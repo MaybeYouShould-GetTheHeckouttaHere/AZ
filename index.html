@@ -97,11 +97,17 @@
             hp: 3, alive: true, color: s.color
           }));
           bullets = [];
+          particles = [];
           break;
 
         case 'state':
           players = msg.players;
           bullets = msg.bullets;
+          if (msg.hits) {
+            for (const hit of msg.hits) {
+              spawnParticles(hit.x, hit.y);
+            }
+          }
           break;
 
         case 'roundEnd':
@@ -206,11 +212,13 @@
     }
 
     // --- Drawing: Tank ---
+    // Hitbox radius is 0.25 cellSize. Visual body fits within that circle.
+    // Inscribed rect in circle r=0.25: max is ~0.35x0.35, use 0.32x0.42 for tank shape
     function drawTank(player) {
       const px = player.x * cellSize;
       const py = player.y * cellSize;
-      const bodyW = 0.5 * cellSize;
-      const bodyL = 0.7 * cellSize;
+      const bodyW = 0.32 * cellSize;
+      const bodyL = 0.42 * cellSize;
       const color = player.color || colors[player.id] || '#888888';
 
       ctx.save();
@@ -231,8 +239,8 @@
       ctx.strokeRect(-bodyW / 2, -bodyL / 2, bodyW, bodyL);
 
       // Barrel (turret)
-      const barrelW = 0.15 * cellSize;
-      const barrelL = 0.4 * cellSize;
+      const barrelW = 0.1 * cellSize;
+      const barrelL = 0.3 * cellSize;
       ctx.fillStyle = darkenColor(color, 0.7);
       ctx.fillRect(-barrelW / 2, -barrelL, barrelW, barrelL);
 
@@ -259,16 +267,18 @@
     }
 
     // --- Drawing: Bullet ---
+    const BULLET_COLOR = '#4A4A4A'; // same gray as walls
+    const BULLET_GLOW = '#6A6A6A';
+
     function drawBullet(bullet) {
       const bx = bullet.x * cellSize;
       const by = bullet.y * cellSize;
       const r = 0.075 * cellSize;
-      const ownerColor = colors[bullet.ownerId] || '#ffffff';
 
       // Glow
       ctx.beginPath();
       ctx.arc(bx, by, r * 1.8, 0, Math.PI * 2);
-      ctx.fillStyle = lightenColor(ownerColor, 0.4);
+      ctx.fillStyle = BULLET_GLOW;
       ctx.globalAlpha = 0.3;
       ctx.fill();
       ctx.globalAlpha = 1;
@@ -276,8 +286,55 @@
       // Bullet
       ctx.beginPath();
       ctx.arc(bx, by, r, 0, Math.PI * 2);
-      ctx.fillStyle = lightenColor(ownerColor, 0.2);
+      ctx.fillStyle = BULLET_COLOR;
       ctx.fill();
+    }
+
+    // --- Particle System ---
+    let particles = [];
+
+    function spawnParticles(x, y) {
+      const count = 6 + Math.floor(Math.random() * 4); // 6-9 particles
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 0.3 + Math.random() * 0.8; // cells/second
+        particles.push({
+          x, y,
+          dx: Math.cos(angle) * speed,
+          dy: Math.sin(angle) * speed,
+          life: 0.3 + Math.random() * 0.3, // 0.3-0.6 seconds
+          maxLife: 0.3 + Math.random() * 0.3,
+          size: 0.03 + Math.random() * 0.04, // cell units
+        });
+      }
+    }
+
+    function updateAndDrawParticles(dt) {
+      ctx.fillStyle = '#4A4A4A';
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.dx * dt;
+        p.y += p.dy * dt;
+        p.life -= dt;
+        p.dx *= 0.96; // drag
+        p.dy *= 0.96;
+
+        if (p.life <= 0) {
+          particles.splice(i, 1);
+          continue;
+        }
+
+        const alpha = (p.life / p.maxLife) * 0.4; // max 40% opacity, fades out
+        const px = p.x * cellSize;
+        const py = p.y * cellSize;
+        const r = p.size * cellSize;
+
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
     }
 
     // --- Drawing: HUD ---
@@ -502,18 +559,25 @@
     }
 
     // --- Render loop ---
+    let lastRenderTime = performance.now();
+
     function render() {
       requestAnimationFrame(render);
+      const now = performance.now();
+      const dt = (now - lastRenderTime) / 1000;
+      lastRenderTime = now;
 
       if (gamePhase === 'lobby') {
         drawLobby();
       } else if (gamePhase === 'playing') {
         drawMap();
+        updateAndDrawParticles(dt); // behind tanks, on top of map
         players.forEach(p => { if (p.alive) drawTank(p); });
         bullets.forEach(b => drawBullet(b));
         drawHUD();
       } else if (gamePhase === 'roundEnd') {
         drawMap();
+        updateAndDrawParticles(dt);
         players.forEach(p => drawTank(p));
         bullets.forEach(b => drawBullet(b));
         drawHUD();

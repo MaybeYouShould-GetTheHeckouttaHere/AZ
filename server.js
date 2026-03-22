@@ -437,75 +437,81 @@ function circleCollidesSegment(cx, cy, r, x1, y1, x2, y2) {
   return dist < r;
 }
 
-// Move tank on one axis with wall collision
-function moveTankX(player, newX, map) {
+// Resolve tank position against all nearby walls (full 2D resolution)
+function resolveTankCollision(x, y, r, map) {
   const { rows, cols, hWalls, vWalls } = map;
-  const y = player.y;
-  const r = TANK_RADIUS;
 
   // Clamp to boundary
-  newX = Math.max(r, Math.min(cols - r, newX));
+  x = Math.max(r, Math.min(cols - r, x));
+  y = Math.max(r, Math.min(rows - r, y));
 
-  // Check vertical walls (vWalls[row][col] is a vertical line at x=col, from y=row to y=row+1)
-  const minRow = Math.max(0, Math.floor(y - r - 0.01));
-  const maxRow = Math.min(rows - 1, Math.floor(y + r + 0.01));
-  const minCol = Math.max(0, Math.floor(newX - 1));
-  const maxCol = Math.min(cols, Math.floor(newX + 1) + 1);
+  // Collect all nearby wall segments
+  const minRow = Math.max(0, Math.floor(y - r - 1));
+  const maxRow = Math.min(rows, Math.floor(y + r + 1) + 1);
+  const minCol = Math.max(0, Math.floor(x - r - 1));
+  const maxCol = Math.min(cols, Math.floor(x + r + 1) + 1);
 
-  for (let c = minCol; c <= maxCol; c++) {
-    for (let row = minRow; row <= maxRow; row++) {
-      if (c < 0 || c > cols || row < 0 || row >= rows) continue;
-      if (!vWalls[row][c]) continue;
-      // Vertical wall at x=c, from y=row to y=row+1
-      if (circleCollidesSegment(newX, y, r, c, row, c, row + 1)) {
-        // Push out horizontally
-        if (newX < c) {
-          newX = c - r;
-        } else {
-          newX = c + r;
+  // Multiple passes to resolve overlaps (handles corners)
+  for (let pass = 0; pass < 3; pass++) {
+    let pushed = false;
+
+    // Check vertical walls
+    for (let c = minCol; c <= Math.min(cols, maxCol); c++) {
+      for (let row = minRow; row <= Math.min(rows - 1, maxRow); row++) {
+        if (!vWalls[row] || !vWalls[row][c]) continue;
+        // Wall segment at x=c, from y=row to y=row+1
+        const closest = closestPointOnSegment(x, y, c, row, c, row + 1);
+        const dist = Math.hypot(x - closest.x, y - closest.y);
+        if (dist < r) {
+          const penetration = r - dist;
+          if (dist > 0.0001) {
+            x += (x - closest.x) / dist * penetration;
+            y += (y - closest.y) / dist * penetration;
+          } else {
+            x += (x < c) ? -penetration : penetration;
+          }
+          pushed = true;
         }
       }
     }
+
+    // Check horizontal walls
+    for (let row = minRow; row <= Math.min(rows, maxRow); row++) {
+      for (let c = minCol; c <= Math.min(cols - 1, maxCol); c++) {
+        if (!hWalls[row] || !hWalls[row][c]) continue;
+        // Wall segment at y=row, from x=c to x=c+1
+        const closest = closestPointOnSegment(x, y, c, row, c + 1, row);
+        const dist = Math.hypot(x - closest.x, y - closest.y);
+        if (dist < r) {
+          const penetration = r - dist;
+          if (dist > 0.0001) {
+            x += (x - closest.x) / dist * penetration;
+            y += (y - closest.y) / dist * penetration;
+          } else {
+            y += (y < row) ? -penetration : penetration;
+          }
+          pushed = true;
+        }
+      }
+    }
+
+    if (!pushed) break;
   }
 
-  // Re-clamp to boundary
-  newX = Math.max(r, Math.min(cols - r, newX));
-  return newX;
+  // Final boundary clamp
+  x = Math.max(r, Math.min(cols - r, x));
+  y = Math.max(r, Math.min(rows - r, y));
+  return { x, y };
 }
 
-function moveTankY(player, newY, map) {
-  const { rows, cols, hWalls, vWalls } = map;
-  const x = player.x;
-  const r = TANK_RADIUS;
-
-  // Clamp to boundary
-  newY = Math.max(r, Math.min(rows - r, newY));
-
-  // Check horizontal walls (hWalls[row][col] is a horizontal line at y=row, from x=col to x=col+1)
-  const minCol = Math.max(0, Math.floor(x - r - 0.01));
-  const maxCol = Math.min(cols - 1, Math.floor(x + r + 0.01));
-  const minRow = Math.max(0, Math.floor(newY - 1));
-  const maxRow = Math.min(rows, Math.floor(newY + 1) + 1);
-
-  for (let row = minRow; row <= maxRow; row++) {
-    for (let c = minCol; c <= maxCol; c++) {
-      if (row < 0 || row > rows || c < 0 || c >= cols) continue;
-      if (!hWalls[row][c]) continue;
-      // Horizontal wall at y=row, from x=c to x=c+1
-      if (circleCollidesSegment(x, newY, r, c, row, c + 1, row)) {
-        // Push out vertically
-        if (newY < row) {
-          newY = row - r;
-        } else {
-          newY = row + r;
-        }
-      }
-    }
-  }
-
-  // Re-clamp to boundary
-  newY = Math.max(r, Math.min(rows - r, newY));
-  return newY;
+// Return closest point on segment (x1,y1)-(x2,y2) to point (px,py)
+function closestPointOnSegment(px, py, x1, y1, x2, y2) {
+  const abx = x2 - x1;
+  const aby = y2 - y1;
+  const ab2 = abx * abx + aby * aby;
+  if (ab2 === 0) return { x: x1, y: y1 };
+  const t = Math.max(0, Math.min(1, ((px - x1) * abx + (py - y1) * aby) / ab2));
+  return { x: x1 + t * abx, y: y1 + t * aby };
 }
 
 // Check if position is inside a wall (for bullet spawn check)
@@ -531,9 +537,12 @@ function isInsideWall(px, py, radius, map) {
   return false;
 }
 
+let frameHits = []; // [{x, y}] - bullet impact positions this tick
+
 function tick() {
   if (!currentMap) return;
   const map = currentMap;
+  frameHits = [];
 
   // --- Tank Movement ---
   for (const [id, player] of players) {
@@ -556,9 +565,9 @@ function tick() {
     }
 
     if (dx !== 0 || dy !== 0) {
-      // Per-axis collision resolution
-      player.x = moveTankX(player, player.x + dx, map);
-      player.y = moveTankY(player, player.y + dy, map);
+      const resolved = resolveTankCollision(player.x + dx, player.y + dy, TANK_RADIUS, map);
+      player.x = resolved.x;
+      player.y = resolved.y;
     }
 
     // --- Bullet Firing (edge trigger) ---
@@ -566,12 +575,21 @@ function tick() {
       // Check if player has no active bullet
       const hasActiveBullet = bullets.some(b => b.ownerId === id);
       if (!hasActiveBullet) {
-        // Spawn bullet at barrel tip
-        let bx = player.x + Math.cos(player.angle) * 0.35;
-        let by = player.y + Math.sin(player.angle) * 0.35;
+        // Spawn bullet at barrel tip, but check the path for walls
+        const cosA = Math.cos(player.angle);
+        const sinA = Math.sin(player.angle);
+        let bx = player.x + cosA * 0.35;
+        let by = player.y + sinA * 0.35;
 
-        // If barrel tip is inside a wall, spawn at tank center
-        if (isInsideWall(bx, by, BULLET_RADIUS, map)) {
+        // Check multiple points along the barrel for wall intersection
+        let spawnBlocked = false;
+        for (let t = 0.1; t <= 0.35; t += 0.05) {
+          if (isInsideWall(player.x + cosA * t, player.y + sinA * t, BULLET_RADIUS, map)) {
+            spawnBlocked = true;
+            break;
+          }
+        }
+        if (spawnBlocked) {
           bx = player.x;
           by = player.y;
         }
@@ -635,6 +653,7 @@ function tick() {
     }
 
     if (hitH || hitV) {
+      frameHits.push({ x: b.x, y: b.y });
       b.bouncesLeft--;
       if (b.bouncesLeft < 0) {
         // Destroy bullet
@@ -675,6 +694,7 @@ function tick() {
       const dist = Math.hypot(b.x - player.x, b.y - player.y);
       if (dist < BULLET_RADIUS + TANK_RADIUS) {
         // Hit!
+        frameHits.push({ x: b.x, y: b.y });
         player.hp--;
         if (player.hp <= 0) {
           player.alive = false;
@@ -807,11 +827,15 @@ function broadcastState() {
     ownerId: b.ownerId,
   }));
 
-  const msg = JSON.stringify({
+  const stateObj = {
     type: 'state',
     players: playersArr,
     bullets: bulletsArr,
-  });
+  };
+  if (frameHits.length > 0) {
+    stateObj.hits = frameHits;
+  }
+  const msg = JSON.stringify(stateObj);
 
   for (const [id, player] of players) {
     if (player.ws.readyState === 1) {
