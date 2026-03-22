@@ -514,10 +514,11 @@ function closestPointOnSegment(px, py, x1, y1, x2, y2) {
   return { x: x1 + t * abx, y: y1 + t * aby };
 }
 
-// Raycast a thin ray from tank center to bullet spawn point.
-// Step size < 1/3 wall thickness to never skip over a wall.
-// Returns {x, y, type: 'h'|'v'} — the last clear position before the wall,
-// plus which wall type was hit. Returns null if path is clear.
+// Raycast a thin point ray from tank center to bullet spawn point.
+// Checks every wall between start and end. If a wall is crossed,
+// returns the spawn position BEFORE the wall (offset by bulletRadius)
+// and which wall type was hit.
+// Returns {x, y, type: 'h'|'v'} or null if path is clear.
 function raycastBulletSpawn(x1, y1, x2, y2, bulletRadius, map) {
   const { rows, cols, hWalls, vWalls } = map;
   const dx = x2 - x1;
@@ -525,64 +526,69 @@ function raycastBulletSpawn(x1, y1, x2, y2, bulletRadius, map) {
   const dist = Math.sqrt(dx * dx + dy * dy);
   if (dist < 0.001) return null;
 
-  // Step size: less than 1/3 of the wall visual thickness in cell units.
-  // Walls are on grid lines, effectively zero-width in physics, but we use
-  // a small step to ensure we detect crossing any grid-aligned wall edge.
-  const stepSize = 0.02; // ~1/50th of a cell, well under 1/3 wall width
-  const steps = Math.ceil(dist / stepSize);
-  const sx = dx / steps;
-  const sy = dy / steps;
+  // Collect all wall crossings along the ray, find the earliest one.
+  let bestT = Infinity;
+  let bestType = null;
+  let bestWallPos = 0;
 
-  let px = x1;
-  let py = y1;
-  let lastClearX = x1;
-  let lastClearY = y1;
-
-  for (let i = 1; i <= steps; i++) {
-    const nx = x1 + sx * i;
-    const ny = y1 + sy * i;
-
-    // Check if we crossed a vertical wall (x crosses an integer boundary)
-    const cellXBefore = Math.floor(px + 0.0001);
-    const cellXAfter = Math.floor(nx + 0.0001);
-    if (Math.floor(px) !== Math.floor(nx) || (Number.isInteger(Math.round(nx * 1000) / 1000) && !Number.isInteger(Math.round(px * 1000) / 1000))) {
-      // Determine which vertical grid line we crossed
-      const wallCol = (nx > px) ? Math.ceil(px) : Math.floor(px);
-      if (wallCol >= 0 && wallCol <= cols) {
-        // Find the row at the crossing point
-        const t = (Math.abs(nx - px) > 0.0001) ? (wallCol - px) / (nx - px) : 0;
-        const crossY = py + t * (ny - py);
-        const wallRow = Math.floor(crossY);
-        if (wallRow >= 0 && wallRow < rows && vWalls[wallRow] && vWalls[wallRow][wallCol]) {
-          // Hit a vertical wall — return last clear position, pushed back by bullet radius
-          const backX = wallCol + ((px < wallCol) ? -bulletRadius : bulletRadius);
-          return { x: backX, y: crossY, type: 'v' };
-        }
+  // Check all horizontal walls the ray might cross.
+  // A horizontal wall at y=R spans x=[C, C+1].
+  // The ray crosses y=R when t = (R - y1) / dy.
+  if (Math.abs(dy) > 0.0001) {
+    // Determine which horizontal grid lines we cross
+    const yStart = Math.min(y1, y2);
+    const yEnd = Math.max(y1, y2);
+    const rowMin = Math.ceil(Math.min(y1, y2));
+    const rowMax = Math.floor(Math.max(y1, y2));
+    for (let R = rowMin; R <= rowMax; R++) {
+      if (R < 0 || R > rows) continue;
+      const t = (R - y1) / dy;
+      if (t < 0.001 || t > 1 || t >= bestT) continue; // skip origin, out of range, or not better
+      const crossX = x1 + dx * t;
+      const C = Math.floor(crossX);
+      if (C >= 0 && C < cols && hWalls[R] && hWalls[R][C]) {
+        bestT = t;
+        bestType = 'h';
+        bestWallPos = R;
       }
     }
-
-    // Check if we crossed a horizontal wall (y crosses an integer boundary)
-    if (Math.floor(py) !== Math.floor(ny) || (Number.isInteger(Math.round(ny * 1000) / 1000) && !Number.isInteger(Math.round(py * 1000) / 1000))) {
-      const wallRow = (ny > py) ? Math.ceil(py) : Math.floor(py);
-      if (wallRow >= 0 && wallRow <= rows) {
-        const t = (Math.abs(ny - py) > 0.0001) ? (wallRow - py) / (ny - py) : 0;
-        const crossX = px + t * (nx - px);
-        const wallCol = Math.floor(crossX);
-        if (wallCol >= 0 && wallCol < cols && hWalls[wallRow] && hWalls[wallRow][wallCol]) {
-          // Hit a horizontal wall — return last clear position, pushed back by bullet radius
-          const backY = wallRow + ((py < wallRow) ? -bulletRadius : bulletRadius);
-          return { x: crossX, y: backY, type: 'h' };
-        }
-      }
-    }
-
-    lastClearX = nx;
-    lastClearY = ny;
-    px = nx;
-    py = ny;
   }
 
-  return null; // path is clear
+  // Check all vertical walls the ray might cross.
+  // A vertical wall at x=C spans y=[R, R+1].
+  // The ray crosses x=C when t = (C - x1) / dx.
+  if (Math.abs(dx) > 0.0001) {
+    const colMin = Math.ceil(Math.min(x1, x2));
+    const colMax = Math.floor(Math.max(x1, x2));
+    for (let C = colMin; C <= colMax; C++) {
+      if (C < 0 || C > cols) continue;
+      const t = (C - x1) / dx;
+      if (t < 0.001 || t > 1 || t >= bestT) continue;
+      const crossY = y1 + dy * t;
+      const R = Math.floor(crossY);
+      if (R >= 0 && R < rows && vWalls[R] && vWalls[R][C]) {
+        bestT = t;
+        bestType = 'v';
+        bestWallPos = C;
+      }
+    }
+  }
+
+  if (bestType === null) return null; // clear path
+
+  // Spawn bullet BEFORE the wall, offset by bullet radius
+  const hitX = x1 + dx * bestT;
+  const hitY = y1 + dy * bestT;
+
+  if (bestType === 'h') {
+    // Horizontal wall at y=bestWallPos. Push bullet back to the tank's side.
+    const spawnY = bestWallPos + ((y1 < bestWallPos) ? -bulletRadius : bulletRadius);
+    return { x: hitX, y: spawnY, type: 'h' };
+  } else {
+    // Vertical wall at x=bestWallPos. Push bullet back to the tank's side.
+    const spawnX = bestWallPos + ((x1 < bestWallPos) ? -bulletRadius : bulletRadius);
+    return { x: spawnX, y: hitY, type: 'v' };
+  }
 }
 
 // Check if position is inside a wall (for bullet spawn check)
