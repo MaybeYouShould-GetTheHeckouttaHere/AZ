@@ -514,6 +514,90 @@ function closestPointOnSegment(px, py, x1, y1, x2, y2) {
   return { x: x1 + t * abx, y: y1 + t * aby };
 }
 
+// Raycast from (x1,y1) to (x2,y2) with given radius, find first wall hit.
+// Returns {x, y, type: 'h'|'v'} of the contact point, or null if clear.
+function raycastWall(x1, y1, x2, y2, radius, map) {
+  const { rows, cols, hWalls, vWalls } = map;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 0.001) return null;
+
+  let bestT = Infinity;
+  let bestHit = null;
+
+  // Check all walls in the region the ray passes through
+  const minX = Math.min(x1, x2);
+  const maxX = Math.max(x1, x2);
+  const minY = Math.min(y1, y2);
+  const maxY = Math.max(y1, y2);
+  const rMinRow = Math.max(0, Math.floor(minY - radius - 1));
+  const rMaxRow = Math.min(rows, Math.floor(maxY + radius + 1) + 1);
+  const rMinCol = Math.max(0, Math.floor(minX - radius - 1));
+  const rMaxCol = Math.min(cols, Math.floor(maxX + radius + 1) + 1);
+
+  // Check horizontal walls
+  for (let row = rMinRow; row <= rMaxRow; row++) {
+    for (let c = rMinCol; c <= Math.min(cols - 1, rMaxCol); c++) {
+      if (!hWalls[row] || !hWalls[row][c]) continue;
+      // Wall segment: (c, row) to (c+1, row)
+      // Find earliest t along ray where circle(center=ray(t), r=radius) touches this segment
+      const t = sweepCircleSegment(x1, y1, dx, dy, radius, c, row, c + 1, row);
+      if (t !== null && t >= 0 && t <= 1 && t < bestT) {
+        bestT = t;
+        bestHit = { x: x1 + dx * t, y: y1 + dy * t, type: 'h' };
+      }
+    }
+  }
+
+  // Check vertical walls
+  for (let c = rMinCol; c <= rMaxCol; c++) {
+    for (let row = rMinRow; row <= Math.min(rows - 1, rMaxRow); row++) {
+      if (!vWalls[row] || !vWalls[row][c]) continue;
+      // Wall segment: (c, row) to (c, row+1)
+      const t = sweepCircleSegment(x1, y1, dx, dy, radius, c, row, c, row + 1);
+      if (t !== null && t >= 0 && t <= 1 && t < bestT) {
+        bestT = t;
+        bestHit = { x: x1 + dx * t, y: y1 + dy * t, type: 'v' };
+      }
+    }
+  }
+
+  return bestHit;
+}
+
+// Find earliest t in [0,1] where circle moving from (ox,oy) by (dx,dy)*t with radius r
+// first touches line segment (sx1,sy1)-(sx2,sy2). Returns t or null.
+function sweepCircleSegment(ox, oy, dx, dy, r, sx1, sy1, sx2, sy2) {
+  // Sample along the ray and find the first collision point
+  const steps = 20;
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const cx = ox + dx * t;
+    const cy = oy + dy * t;
+    const closest = closestPointOnSegment(cx, cy, sx1, sy1, sx2, sy2);
+    const d = Math.hypot(cx - closest.x, cy - closest.y);
+    if (d < r) {
+      // Binary search for precise contact point
+      let lo = (i > 0) ? (i - 1) / steps : 0;
+      let hi = t;
+      for (let j = 0; j < 10; j++) {
+        const mid = (lo + hi) / 2;
+        const mx = ox + dx * mid;
+        const my = oy + dy * mid;
+        const mc = closestPointOnSegment(mx, my, sx1, sy1, sx2, sy2);
+        if (Math.hypot(mx - mc.x, my - mc.y) < r) {
+          hi = mid;
+        } else {
+          lo = mid;
+        }
+      }
+      return hi;
+    }
+  }
+  return null;
+}
+
 // Check if position is inside a wall (for bullet spawn check)
 function isInsideWall(px, py, radius, map) {
   const { rows, cols, hWalls, vWalls } = map;
@@ -575,33 +659,45 @@ function tick() {
       // Check if player has no active bullet
       const hasActiveBullet = bullets.some(b => b.ownerId === id);
       if (!hasActiveBullet) {
-        // Spawn bullet at barrel tip, but check the path for walls
         const cosA = Math.cos(player.angle);
         const sinA = Math.sin(player.angle);
-        let bx = player.x + cosA * 0.35;
-        let by = player.y + sinA * 0.35;
+        let bdx = cosA * BULLET_SPEED;
+        let bdy = sinA * BULLET_SPEED;
 
-        // Check multiple points along the barrel for wall intersection
-        let spawnBlocked = false;
-        for (let t = 0.1; t <= 0.35; t += 0.05) {
-          if (isInsideWall(player.x + cosA * t, player.y + sinA * t, BULLET_RADIUS, map)) {
-            spawnBlocked = true;
-            break;
+        // Raycast from tank center toward barrel tip to find first wall hit
+        const spawnDist = 0.35;
+        const tipX = player.x + cosA * spawnDist;
+        const tipY = player.y + sinA * spawnDist;
+        const hit = raycastWall(player.x, player.y, tipX, tipY, BULLET_RADIUS, map);
+
+        let bx, by;
+        if (hit) {
+          // Wall is in the way — spawn at hit point and bounce off it
+          bx = hit.x;
+          by = hit.y;
+          if (hit.type === 'h') {
+            bdy = -bdy; // reflect off horizontal wall
+          } else {
+            bdx = -bdx; // reflect off vertical wall
           }
-        }
-        if (spawnBlocked) {
-          bx = player.x;
-          by = player.y;
+        } else {
+          // Clear path — spawn at barrel tip
+          bx = tipX;
+          by = tipY;
         }
 
         bullets.push({
           ownerId: id,
           x: bx,
           y: by,
-          dx: Math.cos(player.angle) * BULLET_SPEED,
-          dy: Math.sin(player.angle) * BULLET_SPEED,
-          bouncesLeft: MAX_BOUNCES,
+          dx: bdx,
+          dy: bdy,
+          bouncesLeft: hit ? MAX_BOUNCES - 1 : MAX_BOUNCES,
         });
+
+        if (hit) {
+          frameHits.push({ x: bx, y: by });
+        }
       }
     }
     player.spacePrev = keys.space;
