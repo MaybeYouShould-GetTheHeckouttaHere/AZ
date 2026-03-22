@@ -568,10 +568,18 @@ function raycastWall(x1, y1, x2, y2, radius, map) {
 
 // Find earliest t in [0,1] where circle moving from (ox,oy) by (dx,dy)*t with radius r
 // first touches line segment (sx1,sy1)-(sx2,sy2). Returns t or null.
+// skipIfOverlapping: if the circle already overlaps this segment at t=0, ignore it
+// (the tank is pressed against this wall, we don't want to "hit" it on spawn).
 function sweepCircleSegment(ox, oy, dx, dy, r, sx1, sy1, sx2, sy2) {
+  // Check if already overlapping at t=0 — skip this wall entirely
+  const startClosest = closestPointOnSegment(ox, oy, sx1, sy1, sx2, sy2);
+  if (Math.hypot(ox - startClosest.x, oy - startClosest.y) < r + 0.01) {
+    return null;
+  }
+
   // Sample along the ray and find the first collision point
-  const steps = 20;
-  for (let i = 0; i <= steps; i++) {
+  const steps = 30;
+  for (let i = 1; i <= steps; i++) {
     const t = i / steps;
     const cx = ox + dx * t;
     const cy = oy + dy * t;
@@ -579,9 +587,9 @@ function sweepCircleSegment(ox, oy, dx, dy, r, sx1, sy1, sx2, sy2) {
     const d = Math.hypot(cx - closest.x, cy - closest.y);
     if (d < r) {
       // Binary search for precise contact point
-      let lo = (i > 0) ? (i - 1) / steps : 0;
+      let lo = (i - 1) / steps;
       let hi = t;
-      for (let j = 0; j < 10; j++) {
+      for (let j = 0; j < 12; j++) {
         const mid = (lo + hi) / 2;
         const mx = ox + dx * mid;
         const my = oy + dy * mid;
