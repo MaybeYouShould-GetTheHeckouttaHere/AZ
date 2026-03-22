@@ -67,7 +67,8 @@
     }
 
     // --- WebSocket ---
-    const ws = new WebSocket(`ws://${window.location.host}`);
+    const host = window.location.host || 'localhost:55928';
+    const ws = new WebSocket(`ws://${host}`);
 
     ws.addEventListener('open', () => {
       console.log('Connected to server');
