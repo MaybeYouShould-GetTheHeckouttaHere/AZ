@@ -183,7 +183,7 @@
       if (!map) return;
 
       ctx.strokeStyle = '#4A4A4A';
-      ctx.lineWidth = 3;
+      ctx.lineWidth = Math.max(4, cellSize * 0.08);
       ctx.lineCap = 'square';
 
       // Horizontal walls
