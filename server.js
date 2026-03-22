@@ -514,96 +514,75 @@ function closestPointOnSegment(px, py, x1, y1, x2, y2) {
   return { x: x1 + t * abx, y: y1 + t * aby };
 }
 
-// Raycast from (x1,y1) to (x2,y2) with given radius, find first wall hit.
-// Returns {x, y, type: 'h'|'v'} of the contact point, or null if clear.
-function raycastWall(x1, y1, x2, y2, radius, map) {
+// Raycast a thin ray from tank center to bullet spawn point.
+// Step size < 1/3 wall thickness to never skip over a wall.
+// Returns {x, y, type: 'h'|'v'} — the last clear position before the wall,
+// plus which wall type was hit. Returns null if path is clear.
+function raycastBulletSpawn(x1, y1, x2, y2, bulletRadius, map) {
   const { rows, cols, hWalls, vWalls } = map;
   const dx = x2 - x1;
   const dy = y2 - y1;
   const dist = Math.sqrt(dx * dx + dy * dy);
   if (dist < 0.001) return null;
 
-  let bestT = Infinity;
-  let bestHit = null;
+  // Step size: less than 1/3 of the wall visual thickness in cell units.
+  // Walls are on grid lines, effectively zero-width in physics, but we use
+  // a small step to ensure we detect crossing any grid-aligned wall edge.
+  const stepSize = 0.02; // ~1/50th of a cell, well under 1/3 wall width
+  const steps = Math.ceil(dist / stepSize);
+  const sx = dx / steps;
+  const sy = dy / steps;
 
-  // Check all walls in the region the ray passes through
-  const minX = Math.min(x1, x2);
-  const maxX = Math.max(x1, x2);
-  const minY = Math.min(y1, y2);
-  const maxY = Math.max(y1, y2);
-  const rMinRow = Math.max(0, Math.floor(minY - radius - 1));
-  const rMaxRow = Math.min(rows, Math.floor(maxY + radius + 1) + 1);
-  const rMinCol = Math.max(0, Math.floor(minX - radius - 1));
-  const rMaxCol = Math.min(cols, Math.floor(maxX + radius + 1) + 1);
+  let px = x1;
+  let py = y1;
+  let lastClearX = x1;
+  let lastClearY = y1;
 
-  // Check horizontal walls
-  for (let row = rMinRow; row <= rMaxRow; row++) {
-    for (let c = rMinCol; c <= Math.min(cols - 1, rMaxCol); c++) {
-      if (!hWalls[row] || !hWalls[row][c]) continue;
-      // Wall segment: (c, row) to (c+1, row)
-      // Find earliest t along ray where circle(center=ray(t), r=radius) touches this segment
-      const t = sweepCircleSegment(x1, y1, dx, dy, radius, c, row, c + 1, row);
-      if (t !== null && t >= 0 && t <= 1 && t < bestT) {
-        bestT = t;
-        bestHit = { x: x1 + dx * t, y: y1 + dy * t, type: 'h' };
-      }
-    }
-  }
-
-  // Check vertical walls
-  for (let c = rMinCol; c <= rMaxCol; c++) {
-    for (let row = rMinRow; row <= Math.min(rows - 1, rMaxRow); row++) {
-      if (!vWalls[row] || !vWalls[row][c]) continue;
-      // Wall segment: (c, row) to (c, row+1)
-      const t = sweepCircleSegment(x1, y1, dx, dy, radius, c, row, c, row + 1);
-      if (t !== null && t >= 0 && t <= 1 && t < bestT) {
-        bestT = t;
-        bestHit = { x: x1 + dx * t, y: y1 + dy * t, type: 'v' };
-      }
-    }
-  }
-
-  return bestHit;
-}
-
-// Find earliest t in [0,1] where circle moving from (ox,oy) by (dx,dy)*t with radius r
-// first touches line segment (sx1,sy1)-(sx2,sy2). Returns t or null.
-// skipIfOverlapping: if the circle already overlaps this segment at t=0, ignore it
-// (the tank is pressed against this wall, we don't want to "hit" it on spawn).
-function sweepCircleSegment(ox, oy, dx, dy, r, sx1, sy1, sx2, sy2) {
-  // Check if already overlapping at t=0 — skip this wall entirely
-  const startClosest = closestPointOnSegment(ox, oy, sx1, sy1, sx2, sy2);
-  if (Math.hypot(ox - startClosest.x, oy - startClosest.y) < r + 0.01) {
-    return null;
-  }
-
-  // Sample along the ray and find the first collision point
-  const steps = 30;
   for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const cx = ox + dx * t;
-    const cy = oy + dy * t;
-    const closest = closestPointOnSegment(cx, cy, sx1, sy1, sx2, sy2);
-    const d = Math.hypot(cx - closest.x, cy - closest.y);
-    if (d < r) {
-      // Binary search for precise contact point
-      let lo = (i - 1) / steps;
-      let hi = t;
-      for (let j = 0; j < 12; j++) {
-        const mid = (lo + hi) / 2;
-        const mx = ox + dx * mid;
-        const my = oy + dy * mid;
-        const mc = closestPointOnSegment(mx, my, sx1, sy1, sx2, sy2);
-        if (Math.hypot(mx - mc.x, my - mc.y) < r) {
-          hi = mid;
-        } else {
-          lo = mid;
+    const nx = x1 + sx * i;
+    const ny = y1 + sy * i;
+
+    // Check if we crossed a vertical wall (x crosses an integer boundary)
+    const cellXBefore = Math.floor(px + 0.0001);
+    const cellXAfter = Math.floor(nx + 0.0001);
+    if (Math.floor(px) !== Math.floor(nx) || (Number.isInteger(Math.round(nx * 1000) / 1000) && !Number.isInteger(Math.round(px * 1000) / 1000))) {
+      // Determine which vertical grid line we crossed
+      const wallCol = (nx > px) ? Math.ceil(px) : Math.floor(px);
+      if (wallCol >= 0 && wallCol <= cols) {
+        // Find the row at the crossing point
+        const t = (Math.abs(nx - px) > 0.0001) ? (wallCol - px) / (nx - px) : 0;
+        const crossY = py + t * (ny - py);
+        const wallRow = Math.floor(crossY);
+        if (wallRow >= 0 && wallRow < rows && vWalls[wallRow] && vWalls[wallRow][wallCol]) {
+          // Hit a vertical wall — return last clear position, pushed back by bullet radius
+          const backX = wallCol + ((px < wallCol) ? -bulletRadius : bulletRadius);
+          return { x: backX, y: crossY, type: 'v' };
         }
       }
-      return hi;
     }
+
+    // Check if we crossed a horizontal wall (y crosses an integer boundary)
+    if (Math.floor(py) !== Math.floor(ny) || (Number.isInteger(Math.round(ny * 1000) / 1000) && !Number.isInteger(Math.round(py * 1000) / 1000))) {
+      const wallRow = (ny > py) ? Math.ceil(py) : Math.floor(py);
+      if (wallRow >= 0 && wallRow <= rows) {
+        const t = (Math.abs(ny - py) > 0.0001) ? (wallRow - py) / (ny - py) : 0;
+        const crossX = px + t * (nx - px);
+        const wallCol = Math.floor(crossX);
+        if (wallCol >= 0 && wallCol < cols && hWalls[wallRow] && hWalls[wallRow][wallCol]) {
+          // Hit a horizontal wall — return last clear position, pushed back by bullet radius
+          const backY = wallRow + ((py < wallRow) ? -bulletRadius : bulletRadius);
+          return { x: crossX, y: backY, type: 'h' };
+        }
+      }
+    }
+
+    lastClearX = nx;
+    lastClearY = ny;
+    px = nx;
+    py = ny;
   }
-  return null;
+
+  return null; // path is clear
 }
 
 // Check if position is inside a wall (for bullet spawn check)
@@ -676,7 +655,7 @@ function tick() {
         const spawnDist = 0.35;
         const tipX = player.x + cosA * spawnDist;
         const tipY = player.y + sinA * spawnDist;
-        const hit = raycastWall(player.x, player.y, tipX, tipY, BULLET_RADIUS, map);
+        const hit = raycastBulletSpawn(player.x, player.y, tipX, tipY, BULLET_RADIUS, map);
 
         let bx, by;
         if (hit) {
