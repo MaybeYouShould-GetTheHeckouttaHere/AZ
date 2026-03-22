@@ -66,13 +66,343 @@ function hslToHex(h, s, l) {
   return `#${f(0)}${f(8)}${f(4)}`;
 }
 
-// --- Placeholder Functions ---
+// --- Map Generation ---
 function generateMap(playerCount) {
-  return null;
+  const size = 6 + 3 * playerCount;
+  const rows = size;
+  const cols = size;
+
+  // Initialize all walls to true
+  // hWalls[r][c]: horizontal wall on top edge of row r, column c
+  // hWalls has (rows+1) rows and cols columns
+  const hWalls = [];
+  for (let r = 0; r <= rows; r++) {
+    hWalls[r] = [];
+    for (let c = 0; c < cols; c++) {
+      hWalls[r][c] = true;
+    }
+  }
+
+  // vWalls[r][c]: vertical wall on left edge of row r, column c
+  // vWalls has rows rows and (cols+1) columns
+  const vWalls = [];
+  for (let r = 0; r < rows; r++) {
+    vWalls[r] = [];
+    for (let c = 0; c <= cols; c++) {
+      vWalls[r][c] = true;
+    }
+  }
+
+  // Recursive backtracker (iterative stack-based) starting from (0,0)
+  const visited = [];
+  for (let r = 0; r < rows; r++) {
+    visited[r] = [];
+    for (let c = 0; c < cols; c++) {
+      visited[r][c] = false;
+    }
+  }
+
+  const stack = [];
+  visited[0][0] = true;
+  stack.push([0, 0]);
+
+  while (stack.length > 0) {
+    const [cr, cc] = stack[stack.length - 1];
+    // Get unvisited neighbors
+    const neighbors = [];
+    if (cr > 0 && !visited[cr - 1][cc]) neighbors.push([cr - 1, cc, 'up']);
+    if (cr < rows - 1 && !visited[cr + 1][cc]) neighbors.push([cr + 1, cc, 'down']);
+    if (cc > 0 && !visited[cr][cc - 1]) neighbors.push([cr, cc - 1, 'left']);
+    if (cc < cols - 1 && !visited[cr][cc + 1]) neighbors.push([cr, cc + 1, 'right']);
+
+    if (neighbors.length === 0) {
+      stack.pop();
+      continue;
+    }
+
+    // Shuffle neighbors randomly
+    for (let i = neighbors.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [neighbors[i], neighbors[j]] = [neighbors[j], neighbors[i]];
+    }
+
+    const [nr, nc, dir] = neighbors[0];
+    // Remove wall between current and neighbor
+    if (dir === 'up') {
+      hWalls[cr][cc] = false; // wall on top of current cell
+    } else if (dir === 'down') {
+      hWalls[cr + 1][cc] = false; // wall on bottom of current = top of next
+    } else if (dir === 'left') {
+      vWalls[cr][cc] = false; // wall on left of current cell
+    } else if (dir === 'right') {
+      vWalls[cr][cc + 1] = false; // wall on right of current = left of next
+    }
+
+    visited[nr][nc] = true;
+    stack.push([nr, nc]);
+  }
+
+  // Count interior walls and remove ~30-35% to open up the maze
+  const interiorWalls = [];
+  // Interior horizontal walls: rows 1..rows-1 (not 0 or rows, those are boundary)
+  for (let r = 1; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (hWalls[r][c]) {
+        interiorWalls.push({ type: 'h', r, c });
+      }
+    }
+  }
+  // Interior vertical walls: cols 1..cols-1 (not 0 or cols, those are boundary)
+  for (let r = 0; r < rows; r++) {
+    for (let c = 1; c < cols; c++) {
+      if (vWalls[r][c]) {
+        interiorWalls.push({ type: 'v', r, c });
+      }
+    }
+  }
+
+  // Shuffle and remove ~32% of remaining interior walls
+  for (let i = interiorWalls.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [interiorWalls[i], interiorWalls[j]] = [interiorWalls[j], interiorWalls[i]];
+  }
+  const removeCount = Math.floor(interiorWalls.length * 0.32);
+  for (let i = 0; i < removeCount; i++) {
+    const w = interiorWalls[i];
+    if (w.type === 'h') {
+      hWalls[w.r][w.c] = false;
+    } else {
+      vWalls[w.r][w.c] = false;
+    }
+  }
+
+  return { rows, cols, hWalls, vWalls };
 }
 
+// --- Line of Sight Check ---
+// Returns true if there is a clear line of sight between two points (no walls blocking)
+function hasLineOfSight(map, x1, y1, x2, y2) {
+  const { rows, cols, hWalls, vWalls } = map;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 0.001) return true;
+
+  // Step along the line in small increments, checking wall crossings
+  const steps = Math.ceil(dist * 20); // 20 checks per cell unit
+  const sx = dx / steps;
+  const sy = dy / steps;
+
+  let px = x1;
+  let py = y1;
+
+  for (let i = 0; i < steps; i++) {
+    const nx = px + sx;
+    const ny = py + sy;
+
+    // Check if we crossed a vertical wall (x crosses an integer boundary)
+    const cellXBefore = Math.floor(px);
+    const cellXAfter = Math.floor(nx);
+    if (cellXBefore !== cellXAfter && !(nx === Math.floor(nx) && nx === px)) {
+      // Crossed a vertical grid line
+      const wallCol = Math.max(cellXBefore, cellXAfter);
+      if (wallCol >= 0 && wallCol <= cols) {
+        // Find the row at the crossing point
+        const t = (wallCol - px) / (nx - px);
+        const crossY = py + t * (ny - py);
+        const wallRow = Math.floor(crossY);
+        if (wallRow >= 0 && wallRow < rows && vWalls[wallRow][wallCol]) {
+          return false;
+        }
+      }
+    }
+
+    // Check if we crossed a horizontal wall (y crosses an integer boundary)
+    const cellYBefore = Math.floor(py);
+    const cellYAfter = Math.floor(ny);
+    if (cellYBefore !== cellYAfter && !(ny === Math.floor(ny) && ny === py)) {
+      // Crossed a horizontal grid line
+      const wallRow = Math.max(cellYBefore, cellYAfter);
+      if (wallRow >= 0 && wallRow <= rows) {
+        // Find the column at the crossing point
+        const t = (wallRow - py) / (ny - py);
+        const crossX = px + t * (nx - px);
+        const wallCol = Math.floor(crossX);
+        if (wallCol >= 0 && wallCol < cols && hWalls[wallRow][wallCol]) {
+          return false;
+        }
+      }
+    }
+
+    px = nx;
+    py = ny;
+  }
+
+  return true;
+}
+
+// --- BFS shortest path distance (in cells) ---
+function bfsDistance(map, startCol, startRow, endCol, endRow) {
+  const { rows, cols, hWalls, vWalls } = map;
+  const sr = Math.floor(startRow);
+  const sc = Math.floor(startCol);
+  const er = Math.floor(endRow);
+  const ec = Math.floor(endCol);
+
+  if (sr === er && sc === ec) return 0;
+
+  const visited = [];
+  for (let r = 0; r < rows; r++) {
+    visited[r] = [];
+    for (let c = 0; c < cols; c++) {
+      visited[r][c] = false;
+    }
+  }
+
+  const queue = [[sr, sc, 0]];
+  visited[sr][sc] = true;
+
+  while (queue.length > 0) {
+    const [cr, cc, dist] = queue.shift();
+
+    // Check 4 neighbors
+    // Up: check hWalls[cr][cc] (top wall of current cell)
+    if (cr > 0 && !visited[cr - 1][cc] && !hWalls[cr][cc]) {
+      if (cr - 1 === er && cc === ec) return dist + 1;
+      visited[cr - 1][cc] = true;
+      queue.push([cr - 1, cc, dist + 1]);
+    }
+    // Down: check hWalls[cr+1][cc] (bottom wall of current cell)
+    if (cr < rows - 1 && !visited[cr + 1][cc] && !hWalls[cr + 1][cc]) {
+      if (cr + 1 === er && cc === ec) return dist + 1;
+      visited[cr + 1][cc] = true;
+      queue.push([cr + 1, cc, dist + 1]);
+    }
+    // Left: check vWalls[cr][cc] (left wall of current cell)
+    if (cc > 0 && !visited[cr][cc - 1] && !vWalls[cr][cc]) {
+      if (cr === er && cc - 1 === ec) return dist + 1;
+      visited[cr][cc - 1] = true;
+      queue.push([cr, cc - 1, dist + 1]);
+    }
+    // Right: check vWalls[cr][cc+1] (right wall of current cell)
+    if (cc < cols - 1 && !visited[cr][cc + 1] && !vWalls[cr][cc + 1]) {
+      if (cr === er && cc + 1 === ec) return dist + 1;
+      visited[cr][cc + 1] = true;
+      queue.push([cr, cc + 1, dist + 1]);
+    }
+  }
+
+  return Infinity; // unreachable (shouldn't happen in a connected maze)
+}
+
+// --- Spawn Players ---
 function spawnPlayers(map, players) {
-  // does nothing
+  const spawns = []; // array of {x, y} for placed players
+
+  for (const [id, player] of players) {
+    let bestPos = null;
+
+    if (spawns.length === 0) {
+      // First player: random cell
+      const c = Math.floor(Math.random() * map.cols);
+      const r = Math.floor(Math.random() * map.rows);
+      bestPos = { x: c + 0.5, y: r + 0.5 };
+    } else {
+      // Try up to 20 random positions
+      const candidates = [];
+      let foundNoLOS = false;
+
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const c = Math.floor(Math.random() * map.cols);
+        const r = Math.floor(Math.random() * map.rows);
+        const cx = c + 0.5;
+        const cy = r + 0.5;
+
+        candidates.push({ x: cx, y: cy });
+
+        // Check LOS to all placed players
+        let anyLOS = false;
+        for (const sp of spawns) {
+          if (hasLineOfSight(map, cx, cy, sp.x, sp.y)) {
+            anyLOS = true;
+            break;
+          }
+        }
+
+        if (!anyLOS) {
+          // No line of sight to any placed player - accept
+          bestPos = { x: cx, y: cy };
+          foundNoLOS = true;
+          break;
+        }
+      }
+
+      if (!foundNoLOS) {
+        // All 20 candidates had LOS to some player
+        // Pick the one with greatest shortest-path to nearest placed player
+        let bestDist = -1;
+        for (const cand of candidates) {
+          let minDist = Infinity;
+          for (const sp of spawns) {
+            const d = bfsDistance(map, cand.x, cand.y, sp.x, sp.y);
+            if (d < minDist) minDist = d;
+          }
+          if (minDist > bestDist) {
+            bestDist = minDist;
+            bestPos = cand;
+          }
+        }
+      }
+    }
+
+    player.x = bestPos.x;
+    player.y = bestPos.y;
+    player.angle = Math.random() * 2 * Math.PI;
+    spawns.push(bestPos);
+  }
+
+  return spawns;
+}
+
+// --- Debug Map Printer ---
+function debugPrintMap(map, spawns) {
+  const { rows, cols, hWalls, vWalls } = map;
+
+  // Build spawn lookup: cell (r,c) -> player number
+  const spawnCells = {};
+  if (spawns) {
+    spawns.forEach((sp, i) => {
+      const r = Math.floor(sp.y);
+      const c = Math.floor(sp.x);
+      spawnCells[`${r},${c}`] = i + 1;
+    });
+  }
+
+  const lines = [];
+  for (let r = 0; r <= rows; r++) {
+    // Horizontal wall line
+    let hLine = '+';
+    for (let c = 0; c < cols; c++) {
+      hLine += hWalls[r][c] ? '---+' : '   +';
+    }
+    lines.push(hLine);
+
+    // Cell content + vertical walls line
+    if (r < rows) {
+      let vLine = vWalls[r][0] ? '|' : ' ';
+      for (let c = 0; c < cols; c++) {
+        const key = `${r},${c}`;
+        const content = spawnCells[key] ? ` ${spawnCells[key]} ` : '   ';
+        vLine += content;
+        vLine += vWalls[r][c + 1] ? '|' : ' ';
+      }
+      lines.push(vLine);
+    }
+  }
+
+  console.log('\n=== MAP ===');
+  lines.forEach(l => console.log(l));
+  console.log('===========\n');
 }
 
 function tick() {
@@ -194,7 +524,8 @@ function startGame() {
   }
   gameState = 'playing';
   const map = generateMap(players.size);
-  spawnPlayers(map, players);
+  const spawns = spawnPlayers(map, players);
+  debugPrintMap(map, spawns);
   tickInterval = setInterval(tick, 1000 / TICK_RATE);
   console.log(`Game started with ${players.size} player(s).`);
 }
