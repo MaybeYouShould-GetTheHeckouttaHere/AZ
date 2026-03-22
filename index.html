@@ -25,6 +25,13 @@
     const canvas = document.getElementById('game');
     const ctx = canvas.getContext('2d');
 
+    // --- Game state ---
+    let myId = null;
+    let colors = {};
+    let gamePhase = 'lobby'; // 'lobby', 'playing', 'roundEnd'
+    let map = null;
+    let cellSize = 0;
+
     // --- Canvas sizing ---
     function resizeCanvas() {
       const size = Math.min(800, window.innerWidth - 20, window.innerHeight - 20);
@@ -34,13 +41,6 @@
     }
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
-
-    // --- Game state ---
-    let myId = null;
-    let colors = {};
-    let gamePhase = 'lobby'; // 'lobby', 'playing', 'roundEnd'
-    let map = null;
-    let cellSize = 0;
     let players = [];
     let bullets = [];
     let winnerId = null;
