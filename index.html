@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AZ - Tank Game</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a1a;
+      color: #ffffff;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: sans-serif;
+    }
+    #status {
+      font-size: 2em;
+    }
+  </style>
+</head>
+<body>
+  <div id="status">Waiting for game...</div>
+  <script>
+    const ws = new WebSocket(`ws://${window.location.host}`);
+
+    ws.addEventListener('open', () => {
+      console.log('Connected to server');
+    });
+
+    ws.addEventListener('message', (event) => {
+      const msg = JSON.parse(event.data);
+      console.log(msg);
+    });
+
+    // Input tracking
+    const keys = { w: false, a: false, s: false, d: false, space: false };
+    const codeMap = {
+      KeyW: 'w',
+      KeyA: 'a',
+      KeyS: 's',
+      KeyD: 'd',
+      Space: 'space',
+    };
+
+    function sendInput() {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'input', keys }));
+      }
+    }
+
+    window.addEventListener('keydown', (e) => {
+      const key = codeMap[e.code];
+      if (key !== undefined) {
+        e.preventDefault();
+        if (!keys[key]) {
+          keys[key] = true;
+          sendInput();
+        }
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      const key = codeMap[e.code];
+      if (key !== undefined) {
+        e.preventDefault();
+        if (keys[key]) {
+          keys[key] = false;
+          sendInput();
+        }
+      }
+    });
+  </script>
+</body>
+</html>
