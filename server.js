@@ -662,15 +662,9 @@ function tick() {
       }
     }
 
-    // Boundary bounce
-    if (b.x < BULLET_RADIUS) { b.x = BULLET_RADIUS; b.dx = -b.dx; b.bouncesLeft--; }
-    else if (b.x > cols - BULLET_RADIUS) { b.x = cols - BULLET_RADIUS; b.dx = -b.dx; b.bouncesLeft--; }
-    if (b.y < BULLET_RADIUS) { b.y = BULLET_RADIUS; b.dy = -b.dy; b.bouncesLeft--; }
-    else if (b.y > rows - BULLET_RADIUS) { b.y = rows - BULLET_RADIUS; b.dy = -b.dy; b.bouncesLeft--; }
-
-    if (b.bouncesLeft < 0) {
-      bullets.splice(i, 1);
-    }
+    // Safety clamp (outer walls already handled above, but prevent escape)
+    b.x = Math.max(BULLET_RADIUS, Math.min(cols - BULLET_RADIUS, b.x));
+    b.y = Math.max(BULLET_RADIUS, Math.min(rows - BULLET_RADIUS, b.y));
   }
 
   // --- Bullet-Tank Collision ---
@@ -703,8 +697,9 @@ function tick() {
 
   if (aliveCount <= 1) {
     const winnerId = aliveCount === 1 ? lastAliveId : null;
+    broadcastState(); // send final state showing the killing blow
     endRound(winnerId);
-    return; // skip broadcastState, endRound handles messaging
+    return;
   }
 
   broadcastState();

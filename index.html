@@ -214,7 +214,7 @@
 
       ctx.save();
       ctx.translate(px, py);
-      ctx.rotate(player.angle);
+      ctx.rotate(player.angle + Math.PI / 2);
 
       if (!player.alive) {
         ctx.globalAlpha = 0.35;
