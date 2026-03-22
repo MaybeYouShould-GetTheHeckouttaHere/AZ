@@ -35,6 +35,9 @@ let nextPlayerId = 1;
 let tickInterval = null;
 let bullets = [];          // { ownerId, x, y, dx, dy, bouncesLeft }
 let currentMap = null;
+let scores = {};           // playerId -> number of wins
+let rematchVotes = new Set();
+let roundEndTimer = null;  // 5-second auto-restart timer
 
 // --- Color Assignment ---
 function assignColor(playerIndex) {
@@ -688,7 +691,105 @@ function tick() {
     }
   }
 
+  // --- Round End Check ---
+  let aliveCount = 0;
+  let lastAliveId = null;
+  for (const [id, player] of players) {
+    if (player.alive) {
+      aliveCount++;
+      lastAliveId = id;
+    }
+  }
+
+  if (aliveCount <= 1) {
+    const winnerId = aliveCount === 1 ? lastAliveId : null;
+    endRound(winnerId);
+    return; // skip broadcastState, endRound handles messaging
+  }
+
   broadcastState();
+}
+
+function endRound(winnerId) {
+  // Stop the tick loop
+  if (tickInterval) {
+    clearInterval(tickInterval);
+    tickInterval = null;
+  }
+
+  gameState = 'roundEnd';
+
+  // Increment winner's score
+  if (winnerId !== null) {
+    if (scores[winnerId] === undefined) scores[winnerId] = 0;
+    scores[winnerId]++;
+    console.log(`Round ended - Player ${winnerId} wins!`);
+  } else {
+    console.log('Round ended - Tie!');
+  }
+
+  // Reset rematch votes
+  rematchVotes = new Set();
+
+  // Broadcast roundEnd
+  const msg = JSON.stringify({
+    type: 'roundEnd',
+    winnerId,
+    scores,
+  });
+  for (const [id, player] of players) {
+    if (player.ws.readyState === 1) {
+      player.ws.send(msg);
+    }
+  }
+
+  // Set 5-second auto-restart timer
+  console.log('Waiting for new round...');
+  roundEndTimer = setTimeout(() => {
+    roundEndTimer = null;
+    if (players.size >= 2) {
+      startNewRound();
+    } else {
+      gameState = 'lobby';
+      console.log('Not enough players for new round. Returning to lobby.');
+    }
+  }, 5000);
+}
+
+function startNewRound() {
+  gameState = 'playing';
+  bullets = [];
+  currentMap = generateMap(players.size);
+  const spawns = spawnPlayers(currentMap, players);
+  debugPrintMap(currentMap, spawns);
+
+  // Initialize player game state
+  for (const [id, player] of players) {
+    player.hp = TANK_HP;
+    player.alive = true;
+    player.spacePrev = false;
+  }
+
+  // Build spawns array for broadcast
+  const spawnsArr = [];
+  for (const [id, player] of players) {
+    spawnsArr.push({ id, x: player.x, y: player.y, angle: player.angle, color: player.color });
+  }
+
+  // Broadcast newRound
+  const msg = JSON.stringify({
+    type: 'newRound',
+    map: { rows: currentMap.rows, cols: currentMap.cols, hWalls: currentMap.hWalls, vWalls: currentMap.vWalls },
+    spawns: spawnsArr,
+  });
+  for (const [id, player] of players) {
+    if (player.ws.readyState === 1) {
+      player.ws.send(msg);
+    }
+  }
+
+  tickInterval = setInterval(tick, 1000 / TICK_RATE);
+  console.log(`New round started with ${players.size} player(s).`);
 }
 
 function broadcastState() {
@@ -766,6 +867,11 @@ wss.on('connection', (ws) => {
     msgTimestamps: [],
   });
 
+  // Initialize score if not present
+  if (scores[playerId] === undefined) {
+    scores[playerId] = 0;
+  }
+
   console.log(`Player ${playerId} connected (${color}). Total: ${players.size}`);
 
   // Send init message
@@ -814,24 +920,135 @@ wss.on('connection', (ws) => {
         space: !!msg.keys.space,
       };
     }
+
+    if (msg.type === 'rematch' && gameState === 'roundEnd') {
+      rematchVotes.add(playerId);
+      console.log(`Player ${playerId} voted for rematch. Votes: ${rematchVotes.size}/${players.size}`);
+
+      // Broadcast rematch vote status
+      const voteMsg = JSON.stringify({
+        type: 'rematch',
+        votes: Array.from(rematchVotes),
+      });
+      for (const [id, p] of players) {
+        if (p.ws.readyState === 1) {
+          p.ws.send(voteMsg);
+        }
+      }
+
+      // Check if rematch should trigger immediately
+      // Host = first connected player (lowest ID)
+      const hostId = Math.min(...Array.from(players.keys()));
+      const allNonHostVoted = Array.from(players.keys())
+        .filter(id => id !== hostId)
+        .every(id => rematchVotes.has(id));
+
+      if (rematchVotes.has(hostId) || (players.size > 1 && allNonHostVoted)) {
+        console.log('Rematch vote passed! Starting new round immediately.');
+        if (roundEndTimer) {
+          clearTimeout(roundEndTimer);
+          roundEndTimer = null;
+        }
+        if (players.size >= 2) {
+          startNewRound();
+        } else {
+          gameState = 'lobby';
+          console.log('Not enough players for new round. Returning to lobby.');
+        }
+      }
+    }
   });
 
   ws.on('close', () => {
-    players.delete(playerId);
-    console.log(`Player ${playerId} disconnected. Total: ${players.size}`);
+    console.log(`Player ${playerId} disconnected. Total: ${players.size - 1}`);
 
-    if (gameState === 'playing' && players.size === 0) {
-      stopGame();
+    if (gameState === 'lobby') {
+      players.delete(playerId);
+      // Broadcast updated player list / colors
+      const colorsMsg = JSON.stringify({ type: 'playerJoined', colors: getColorsMap() });
+      for (const [id, p] of players) {
+        if (p.ws.readyState === 1) {
+          p.ws.send(colorsMsg);
+        }
+      }
+    } else if (gameState === 'playing') {
+      // Mark as dead, don't remove (bullets stay, score persists)
+      const player = players.get(playerId);
+      if (player) {
+        player.alive = false;
+        console.log(`Player ${playerId} died (disconnected during play).`);
+      }
+      players.delete(playerId);
+
+      if (players.size === 0) {
+        stopGame();
+        return;
+      }
+
+      // Check if round should end (<=1 alive among remaining players)
+      let aliveCount = 0;
+      let lastAliveId = null;
+      for (const [id, p] of players) {
+        if (p.alive) {
+          aliveCount++;
+          lastAliveId = id;
+        }
+      }
+      if (aliveCount <= 1) {
+        const winnerId = aliveCount === 1 ? lastAliveId : null;
+        endRound(winnerId);
+      }
+    } else if (gameState === 'roundEnd') {
+      players.delete(playerId);
+      rematchVotes.delete(playerId);
+
+      if (players.size === 0) {
+        // All players disconnected, reset
+        if (roundEndTimer) {
+          clearTimeout(roundEndTimer);
+          roundEndTimer = null;
+        }
+        gameState = 'lobby';
+        console.log('All players disconnected. Returning to lobby.');
+        return;
+      }
+
+      // Re-evaluate rematch conditions
+      const hostId = Math.min(...Array.from(players.keys()));
+      const allNonHostVoted = Array.from(players.keys())
+        .filter(id => id !== hostId)
+        .every(id => rematchVotes.has(id));
+
+      if (rematchVotes.has(hostId) || (players.size > 1 && allNonHostVoted)) {
+        console.log('Rematch vote passed after disconnect! Starting new round immediately.');
+        if (roundEndTimer) {
+          clearTimeout(roundEndTimer);
+          roundEndTimer = null;
+        }
+        if (players.size >= 2) {
+          startNewRound();
+        } else {
+          gameState = 'lobby';
+          console.log('Not enough players for new round. Returning to lobby.');
+        }
+      }
     }
   });
 });
 
 // --- Game Flow ---
 function startGame() {
-  if (players.size === 0) {
-    console.log('No players connected. Cannot start.');
+  if (players.size < 2) {
+    console.log('Need at least 2 players to start. Cannot start.');
     return;
   }
+
+  // Cancel any pending round end timer
+  if (roundEndTimer) {
+    clearTimeout(roundEndTimer);
+    roundEndTimer = null;
+  }
+
   gameState = 'playing';
   bullets = [];
   currentMap = generateMap(players.size);
@@ -845,14 +1062,21 @@ function startGame() {
     player.spacePrev = false;
   }
 
-  // Send map to all clients
-  const mapMsg = JSON.stringify({
-    type: 'gameStart',
+  // Build spawns array for broadcast
+  const spawnsArr = [];
+  for (const [id, player] of players) {
+    spawnsArr.push({ id, x: player.x, y: player.y, angle: player.angle, color: player.color });
+  }
+
+  // Send newRound to all clients
+  const roundMsg = JSON.stringify({
+    type: 'newRound',
     map: { rows: currentMap.rows, cols: currentMap.cols, hWalls: currentMap.hWalls, vWalls: currentMap.vWalls },
+    spawns: spawnsArr,
   });
   for (const [id, player] of players) {
     if (player.ws.readyState === 1) {
-      player.ws.send(mapMsg);
+      player.ws.send(roundMsg);
     }
   }
 
@@ -866,14 +1090,41 @@ function stopGame() {
     clearInterval(tickInterval);
     tickInterval = null;
   }
+  if (roundEndTimer) {
+    clearTimeout(roundEndTimer);
+    roundEndTimer = null;
+  }
   bullets = [];
   currentMap = null;
+  rematchVotes = new Set();
   console.log('Round ended. Returning to lobby.');
 }
 
-function restartGame() {
-  stopGame();
-  startGame();
+function fullRestart() {
+  // Full restart: clear all state, disconnect all clients, return to lobby
+  if (tickInterval) {
+    clearInterval(tickInterval);
+    tickInterval = null;
+  }
+  if (roundEndTimer) {
+    clearTimeout(roundEndTimer);
+    roundEndTimer = null;
+  }
+  gameState = 'lobby';
+  bullets = [];
+  currentMap = null;
+  scores = {};
+  rematchVotes = new Set();
+
+  // Disconnect all WebSocket clients
+  for (const [id, player] of players) {
+    if (player.ws.readyState === 1) {
+      player.ws.close();
+    }
+  }
+  players = new Map();
+  nextPlayerId = 1;
+  console.log('Server restarted.');
 }
 
 // --- Terminal Keypress Listener ---
@@ -888,12 +1139,16 @@ if (process.stdin.isTTY) {
       process.exit();
     }
     if (key.toLowerCase() === 's') {
-      console.log('Starting game...');
-      startGame();
+      if (gameState === 'lobby' || gameState === 'roundEnd') {
+        console.log('Starting game...');
+        startGame();
+      } else {
+        console.log(`Cannot start game in '${gameState}' state.`);
+      }
     }
     if (key.toLowerCase() === 'r') {
-      console.log('Restarting game...');
-      restartGame();
+      console.log('Full restart...');
+      fullRestart();
     }
   });
 }
