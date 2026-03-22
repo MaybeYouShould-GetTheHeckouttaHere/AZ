@@ -1,28 +1,72 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AZ - Tank Game</title>
+  <title>AZ</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       background: #1a1a1a;
-      color: #ffffff;
       display: flex;
       justify-content: center;
       align-items: center;
       height: 100vh;
-      font-family: sans-serif;
+      overflow: hidden;
     }
-    #status {
-      font-size: 2em;
+    canvas {
+      display: block;
     }
   </style>
 </head>
 <body>
-  <div id="status">Waiting for game...</div>
+  <canvas id="game"></canvas>
   <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    // --- Canvas sizing ---
+    function resizeCanvas() {
+      const size = Math.min(800, window.innerWidth - 20, window.innerHeight - 20);
+      canvas.width = size;
+      canvas.height = size;
+      if (map) cellSize = size / map.rows;
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    // --- Game state ---
+    let myId = null;
+    let colors = {};
+    let gamePhase = 'lobby'; // 'lobby', 'playing', 'roundEnd'
+    let map = null;
+    let cellSize = 0;
+    let players = [];
+    let bullets = [];
+    let winnerId = null;
+    let scores = {};
+    let rematchVotes = [];
+    let countdownEnd = 0;
+
+    // Rematch button bounds (set during drawing)
+    let rematchBtn = { x: 0, y: 0, w: 0, h: 0 };
+
+    // --- Color helpers ---
+    function darkenColor(hex, factor) {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgb(${Math.floor(r * factor)}, ${Math.floor(g * factor)}, ${Math.floor(b * factor)})`;
+    }
+
+    function lightenColor(hex, factor) {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgb(${Math.min(255, Math.floor(r + (255 - r) * factor))}, ${Math.min(255, Math.floor(g + (255 - g) * factor))}, ${Math.min(255, Math.floor(b + (255 - b) * factor))})`;
+    }
+
+    // --- WebSocket ---
     const ws = new WebSocket(`ws://${window.location.host}`);
 
     ws.addEventListener('open', () => {
@@ -31,46 +75,451 @@
 
     ws.addEventListener('message', (event) => {
       const msg = JSON.parse(event.data);
-      console.log(msg);
+
+      switch (msg.type) {
+        case 'init':
+          myId = msg.playerId;
+          colors = msg.colors;
+          break;
+
+        case 'playerJoined':
+          colors = msg.colors;
+          break;
+
+        case 'newRound':
+          gamePhase = 'playing';
+          map = msg.map;
+          cellSize = canvas.width / map.rows;
+          // Initialize players from spawns
+          players = msg.spawns.map(s => ({
+            id: s.id, x: s.x, y: s.y, angle: s.angle,
+            hp: 3, alive: true, color: s.color
+          }));
+          bullets = [];
+          break;
+
+        case 'state':
+          players = msg.players;
+          bullets = msg.bullets;
+          break;
+
+        case 'roundEnd':
+          gamePhase = 'roundEnd';
+          winnerId = msg.winnerId;
+          scores = msg.scores;
+          countdownEnd = Date.now() + 5000;
+          rematchVotes = [];
+          break;
+
+        case 'rematch':
+          rematchVotes = msg.votes;
+          break;
+      }
     });
 
-    // Input tracking
+    // --- Input handling ---
     const keys = { w: false, a: false, s: false, d: false, space: false };
-    const codeMap = {
-      KeyW: 'w',
-      KeyA: 'a',
-      KeyS: 's',
-      KeyD: 'd',
-      Space: 'space',
+    let lastSentKeys = null;
+
+    const keyMap = {
+      'KeyW': 'w', 'KeyA': 'a', 'KeyS': 's', 'KeyD': 'd', 'Space': 'space'
     };
 
-    function sendInput() {
-      if (ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: 'input', keys }));
-      }
-    }
-
     window.addEventListener('keydown', (e) => {
-      const key = codeMap[e.code];
-      if (key !== undefined) {
+      const key = keyMap[e.code];
+      if (key) {
         e.preventDefault();
-        if (!keys[key]) {
-          keys[key] = true;
-          sendInput();
-        }
+        keys[key] = true;
+        sendInput();
       }
     });
 
     window.addEventListener('keyup', (e) => {
-      const key = codeMap[e.code];
-      if (key !== undefined) {
+      const key = keyMap[e.code];
+      if (key) {
         e.preventDefault();
-        if (keys[key]) {
-          keys[key] = false;
-          sendInput();
-        }
+        keys[key] = false;
+        sendInput();
       }
     });
+
+    function sendInput() {
+      const json = JSON.stringify(keys);
+      if (json !== lastSentKeys && ws.readyState === 1) {
+        lastSentKeys = json;
+        ws.send(JSON.stringify({ type: 'input', keys }));
+      }
+    }
+
+    // --- Rematch click ---
+    canvas.addEventListener('click', (e) => {
+      if (gamePhase !== 'roundEnd') return;
+      const rect = canvas.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      // Scale to canvas coords
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = cx * scaleX;
+      const y = cy * scaleY;
+      if (x >= rematchBtn.x && x <= rematchBtn.x + rematchBtn.w &&
+          y >= rematchBtn.y && y <= rematchBtn.y + rematchBtn.h) {
+        ws.send(JSON.stringify({ type: 'rematch' }));
+      }
+    });
+
+    // --- Drawing: Map ---
+    function drawMap() {
+      ctx.fillStyle = '#C0C0C0';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      if (!map) return;
+
+      ctx.strokeStyle = '#4A4A4A';
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'square';
+
+      // Horizontal walls
+      for (let row = 0; row < map.hWalls.length; row++) {
+        for (let col = 0; col < map.hWalls[row].length; col++) {
+          if (map.hWalls[row][col]) {
+            ctx.beginPath();
+            ctx.moveTo(col * cellSize, row * cellSize);
+            ctx.lineTo((col + 1) * cellSize, row * cellSize);
+            ctx.stroke();
+          }
+        }
+      }
+
+      // Vertical walls
+      for (let row = 0; row < map.vWalls.length; row++) {
+        for (let col = 0; col < map.vWalls[row].length; col++) {
+          if (map.vWalls[row][col]) {
+            ctx.beginPath();
+            ctx.moveTo(col * cellSize, row * cellSize);
+            ctx.lineTo(col * cellSize, (row + 1) * cellSize);
+            ctx.stroke();
+          }
+        }
+      }
+    }
+
+    // --- Drawing: Tank ---
+    function drawTank(player) {
+      const px = player.x * cellSize;
+      const py = player.y * cellSize;
+      const bodyW = 0.5 * cellSize;
+      const bodyL = 0.7 * cellSize;
+      const color = player.color || colors[player.id] || '#888888';
+
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(player.angle);
+
+      if (!player.alive) {
+        ctx.globalAlpha = 0.35;
+      }
+
+      // Body
+      ctx.fillStyle = color;
+      ctx.fillRect(-bodyW / 2, -bodyL / 2, bodyW, bodyL);
+
+      // Outline
+      ctx.strokeStyle = darkenColor(color, 0.5);
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-bodyW / 2, -bodyL / 2, bodyW, bodyL);
+
+      // Barrel (turret)
+      const barrelW = 0.15 * cellSize;
+      const barrelL = 0.4 * cellSize;
+      ctx.fillStyle = darkenColor(color, 0.7);
+      ctx.fillRect(-barrelW / 2, -barrelL, barrelW, barrelL);
+
+      // Barrel outline
+      ctx.strokeStyle = darkenColor(color, 0.5);
+      ctx.lineWidth = 1;
+      ctx.strokeRect(-barrelW / 2, -barrelL, barrelW, barrelL);
+
+      ctx.globalAlpha = 1;
+      ctx.restore();
+
+      // Player label (not rotated)
+      ctx.save();
+      ctx.font = `bold ${Math.max(10, cellSize * 0.22)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      // Shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillText(`P${player.id}`, px + 1, py - bodyL / 2 - 3 + 1);
+      // Text
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(`P${player.id}`, px, py - bodyL / 2 - 3);
+      ctx.restore();
+    }
+
+    // --- Drawing: Bullet ---
+    function drawBullet(bullet) {
+      const bx = bullet.x * cellSize;
+      const by = bullet.y * cellSize;
+      const r = 0.075 * cellSize;
+      const ownerColor = colors[bullet.ownerId] || '#ffffff';
+
+      // Glow
+      ctx.beginPath();
+      ctx.arc(bx, by, r * 1.8, 0, Math.PI * 2);
+      ctx.fillStyle = lightenColor(ownerColor, 0.4);
+      ctx.globalAlpha = 0.3;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // Bullet
+      ctx.beginPath();
+      ctx.arc(bx, by, r, 0, Math.PI * 2);
+      ctx.fillStyle = lightenColor(ownerColor, 0.2);
+      ctx.fill();
+    }
+
+    // --- Drawing: HUD ---
+    function drawHUD() {
+      const padding = 10;
+      const rowH = 25;
+      const fontSize = Math.max(11, Math.min(14, canvas.width * 0.018));
+      ctx.font = `bold ${fontSize}px sans-serif`;
+
+      // Sort players by id
+      const sorted = [...players].sort((a, b) => a.id - b.id);
+
+      // --- Health display (top-left) ---
+      for (let i = 0; i < sorted.length; i++) {
+        const p = sorted[i];
+        const y = padding + i * rowH + 12;
+        const color = p.color || colors[p.id] || '#888';
+
+        // Color swatch
+        ctx.fillStyle = color;
+        ctx.fillRect(padding, y - 8, 10, 10);
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(padding, y - 8, 10, 10);
+
+        // Label
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowColor = 'rgba(0,0,0,0.6)';
+        ctx.shadowBlur = 2;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`P${p.id}`, padding + 15, y - 3);
+
+        // Health pips
+        const hp = p.hp != null ? p.hp : 0;
+        for (let h = 0; h < 3; h++) {
+          const pipX = padding + 50 + h * 16;
+          const pipY = y - 3;
+          ctx.beginPath();
+          ctx.arc(pipX, pipY, 5, 0, Math.PI * 2);
+          if (h < hp) {
+            ctx.fillStyle = color;
+          } else {
+            ctx.fillStyle = '#555555';
+          }
+          ctx.fill();
+          ctx.strokeStyle = '#333';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+        ctx.shadowBlur = 0;
+      }
+
+      // --- Score display (top-right) ---
+      ctx.textAlign = 'right';
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowColor = 'rgba(0,0,0,0.6)';
+      ctx.shadowBlur = 2;
+      ctx.fillText('Scores', canvas.width - padding, padding + 12);
+      ctx.shadowBlur = 0;
+
+      for (let i = 0; i < sorted.length; i++) {
+        const p = sorted[i];
+        const y = padding + (i + 1) * rowH + 12;
+        const color = p.color || colors[p.id] || '#888';
+        const wins = scores[p.id] || 0;
+
+        ctx.fillStyle = color;
+        ctx.shadowColor = 'rgba(0,0,0,0.6)';
+        ctx.shadowBlur = 2;
+        ctx.fillText(`P${p.id}: ${wins}`, canvas.width - padding, y);
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // --- Drawing: Lobby ---
+    function drawLobby() {
+      ctx.fillStyle = '#2a2a2a';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const cx = canvas.width / 2;
+      let y = canvas.height * 0.25;
+
+      // Title
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `bold ${canvas.width * 0.12}px sans-serif`;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('AZ', cx, y);
+
+      // Subtitle
+      y += canvas.width * 0.1;
+      ctx.font = `${canvas.width * 0.03}px sans-serif`;
+      ctx.fillStyle = '#888888';
+      ctx.fillText('Waiting for host to start...', cx, y);
+
+      // Player count
+      const playerIds = Object.keys(colors);
+      y += canvas.width * 0.06;
+      ctx.font = `bold ${canvas.width * 0.03}px sans-serif`;
+      ctx.fillStyle = '#aaaaaa';
+      ctx.fillText(`Players: ${playerIds.length}`, cx, y);
+
+      // Player list
+      y += canvas.width * 0.05;
+      ctx.font = `${canvas.width * 0.025}px sans-serif`;
+      for (const id of playerIds) {
+        const color = colors[id];
+        // Swatch
+        ctx.fillStyle = color;
+        ctx.fillRect(cx - 60, y - 7, 14, 14);
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(cx - 60, y - 7, 14, 14);
+        // Name
+        ctx.fillStyle = '#cccccc';
+        ctx.textAlign = 'left';
+        ctx.fillText(`Player ${id}`, cx - 40, y);
+        ctx.textAlign = 'center';
+        y += canvas.width * 0.04;
+      }
+
+      // Connection status
+      y = canvas.height * 0.85;
+      ctx.font = `${canvas.width * 0.02}px sans-serif`;
+      if (ws.readyState === 1) {
+        ctx.fillStyle = '#55cc55';
+        ctx.fillText('Connected', cx, y);
+      } else {
+        ctx.fillStyle = '#cc5555';
+        ctx.fillText('Disconnected', cx, y);
+      }
+    }
+
+    // --- Drawing: Score overlay ---
+    function drawScoreOverlay() {
+      // Dim overlay
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const cx = canvas.width / 2;
+      let y = canvas.height * 0.3;
+
+      // Winner text
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `bold ${canvas.width * 0.07}px sans-serif`;
+      ctx.shadowColor = 'rgba(0,0,0,0.8)';
+      ctx.shadowBlur = 6;
+      ctx.fillStyle = '#ffffff';
+      if (winnerId != null) {
+        ctx.fillText(`Player ${winnerId} wins!`, cx, y);
+      } else {
+        ctx.fillText('Tie!', cx, y);
+      }
+      ctx.shadowBlur = 0;
+
+      // Countdown
+      y += canvas.width * 0.08;
+      const remaining = Math.max(0, Math.ceil((countdownEnd - Date.now()) / 1000));
+      ctx.font = `${canvas.width * 0.035}px sans-serif`;
+      ctx.fillStyle = '#cccccc';
+      ctx.fillText(`Next round in ${remaining}...`, cx, y);
+
+      // Scores
+      y += canvas.width * 0.07;
+      ctx.font = `bold ${canvas.width * 0.03}px sans-serif`;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('Scores', cx, y);
+
+      y += canvas.width * 0.045;
+      ctx.font = `${canvas.width * 0.025}px sans-serif`;
+      const scoreIds = Object.keys(scores).sort((a, b) => Number(a) - Number(b));
+      for (const id of scoreIds) {
+        const color = colors[id] || '#888';
+        ctx.fillStyle = color;
+        ctx.fillText(`P${id}: ${scores[id]}`, cx, y);
+        y += canvas.width * 0.035;
+      }
+
+      // Rematch button
+      const btnW = canvas.width * 0.3;
+      const btnH = canvas.width * 0.06;
+      const btnX = cx - btnW / 2;
+      const btnY = y + canvas.width * 0.02;
+      rematchBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+      // Check if we already voted
+      const alreadyVoted = rematchVotes.includes(myId);
+
+      ctx.fillStyle = alreadyVoted ? '#335533' : '#446644';
+      ctx.strokeStyle = '#88bb88';
+      ctx.lineWidth = 2;
+      // Rounded rect
+      const radius = 6;
+      ctx.beginPath();
+      ctx.moveTo(btnX + radius, btnY);
+      ctx.lineTo(btnX + btnW - radius, btnY);
+      ctx.quadraticCurveTo(btnX + btnW, btnY, btnX + btnW, btnY + radius);
+      ctx.lineTo(btnX + btnW, btnY + btnH - radius);
+      ctx.quadraticCurveTo(btnX + btnW, btnY + btnH, btnX + btnW - radius, btnY + btnH);
+      ctx.lineTo(btnX + radius, btnY + btnH);
+      ctx.quadraticCurveTo(btnX, btnY + btnH, btnX, btnY + btnH - radius);
+      ctx.lineTo(btnX, btnY + radius);
+      ctx.quadraticCurveTo(btnX, btnY, btnX + radius, btnY);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.font = `bold ${canvas.width * 0.025}px sans-serif`;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(alreadyVoted ? 'Voted!' : 'Rematch', cx, btnY + btnH / 2);
+
+      // Vote status
+      if (rematchVotes.length > 0) {
+        const voteY = btnY + btnH + canvas.width * 0.03;
+        ctx.font = `${canvas.width * 0.02}px sans-serif`;
+        ctx.fillStyle = '#aaaaaa';
+        const voterNames = rematchVotes.map(id => `P${id}`).join(', ');
+        ctx.fillText(`Votes: ${voterNames}`, cx, voteY);
+      }
+    }
+
+    // --- Render loop ---
+    function render() {
+      requestAnimationFrame(render);
+
+      if (gamePhase === 'lobby') {
+        drawLobby();
+      } else if (gamePhase === 'playing') {
+        drawMap();
+        players.forEach(p => { if (p.alive) drawTank(p); });
+        bullets.forEach(b => drawBullet(b));
+        drawHUD();
+      } else if (gamePhase === 'roundEnd') {
+        drawMap();
+        players.forEach(p => drawTank(p));
+        bullets.forEach(b => drawBullet(b));
+        drawHUD();
+        drawScoreOverlay();
+      }
+    }
+    render();
   </script>
 </body>
 </html>
