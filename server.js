@@ -1,43 +1,83 @@
 const http = require('http');
 const fs = require('fs');
+const path = require('path');
 const { WebSocketServer } = require('ws');
 
-// --- Constants ---
-const PORT = 55928;
-const TICK_RATE = 60;
-const MSG_RATE_LIMIT = 120; // max messages per second per player
+// --- Load Config ---
+const CONFIG_PATH = path.join(__dirname, 'config.json');
+let cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 
-const PRESET_COLORS = [
-  { name: 'Red',    hex: '#E74C3C', hue: 6   },
-  { name: 'Blue',   hex: '#3498DB', hue: 204 },
-  { name: 'Green',  hex: '#2ECC71', hue: 145 },
-  { name: 'Orange', hex: '#E67E22', hue: 28  },
-  { name: 'Purple', hex: '#9B59B6', hue: 283 },
-  { name: 'Teal',   hex: '#1ABC9C', hue: 168 },
-  { name: 'Yellow', hex: '#F1C40F', hue: 48  },
-  { name: 'Pink',   hex: '#E91E63', hue: 340 },
-];
+function reloadConfig() {
+  try {
+    cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    TICK_RATE = cfg.tickRate;
+    MSG_RATE_LIMIT = cfg.msgRateLimit;
+    PRESET_COLORS = cfg.colors;
+    TANK_RADIUS = cfg.tankRadius;
+    BULLET_RADIUS = cfg.bulletRadius;
+    TANK_SPEED = cfg.tankSpeed;
+    ROTATION_SPEED = cfg.rotationSpeed * Math.PI / 180;
+    BULLET_SPEED = cfg.bulletSpeed;
+    MAX_BOUNCES = cfg.maxBounces;
+    TANK_HP = cfg.tankHP;
+    MAX_PLAYERS = cfg.maxPlayers || 6;
+    READY_THRESHOLD = cfg.readyThreshold || 0.67;
+    READY_COUNTDOWN_MS = cfg.readyCountdownMs || 10000;
+    MISSILE_SPEED = cfg.missileSpeed || 3.2;
+    MISSILE_ACCEL = cfg.missileAccel || 8;
+    MISSILE_RADIUS = cfg.missileRadius || 0.15;
+    MISSILE_LIFETIME = cfg.missileLifetime || 12;
+    MISSILE_RETARGET_INTERVAL = cfg.missileRetargetInterval || 1;
+    POWERUP_SPAWN_INTERVAL = cfg.powerUpSpawnInterval || 10;
+    POWERUP_RADIUS = cfg.powerUpRadius || 0.3;
+    MAX_POWERUPS = cfg.maxPowerUps || 3;
+    console.log('Config reloaded.');
+  } catch (e) {
+    console.error('Failed to reload config:', e.message);
+  }
+}
 
-// --- Physics Constants ---
-const TANK_RADIUS = 0.25;
-const BULLET_RADIUS = 0.075;
-const TANK_SPEED = 3;           // cells per second
-const ROTATION_SPEED = Math.PI; // radians per second (180 deg/s)
-const BULLET_SPEED = 6;         // cells per second
-const MAX_BOUNCES = 6;
-const TANK_HP = 3;
-const DT = 1 / TICK_RATE;
+// --- Constants (from config) ---
+const PORT = cfg.port; // port can't change at runtime
+let TICK_RATE = cfg.tickRate;
+let MSG_RATE_LIMIT = cfg.msgRateLimit;
+let PRESET_COLORS = cfg.colors;
+let MAX_PLAYERS = cfg.maxPlayers || 6;
+let READY_THRESHOLD = cfg.readyThreshold || 0.67;
+let READY_COUNTDOWN_MS = cfg.readyCountdownMs || 10000;
+
+// --- Physics Constants (from config) ---
+let TANK_RADIUS = cfg.tankRadius;
+let BULLET_RADIUS = cfg.bulletRadius;
+let TANK_SPEED = cfg.tankSpeed;
+let ROTATION_SPEED = cfg.rotationSpeed * Math.PI / 180; // config is degrees/s
+let BULLET_SPEED = cfg.bulletSpeed;
+let MAX_BOUNCES = cfg.maxBounces;
+let TANK_HP = cfg.tankHP;
+let MISSILE_SPEED = cfg.missileSpeed || 3.2;
+let MISSILE_ACCEL = cfg.missileAccel || 8;
+let MISSILE_RADIUS = cfg.missileRadius || 0.15;
+let MISSILE_LIFETIME = cfg.missileLifetime || 12;
+let MISSILE_RETARGET_INTERVAL = cfg.missileRetargetInterval || 1;
+let POWERUP_SPAWN_INTERVAL = cfg.powerUpSpawnInterval || 10;
+let POWERUP_RADIUS = cfg.powerUpRadius || 0.3;
+let MAX_POWERUPS = cfg.maxPowerUps || 3;
 
 // --- Game State ---
 let gameState = 'lobby'; // lobby | playing | roundEnd
-let players = new Map();  // id -> { ws, color, input, alive, msgTimestamps, x, y, angle, hp, spacePrev }
-let nextPlayerId = 1;
+let players = new Map();  // id -> { ws, color, name, ready, input, alive, msgTimestamps, x, y, angle, hp, spacePrev }
 let tickInterval = null;
 let bullets = [];          // { ownerId, x, y, dx, dy, bouncesLeft }
 let currentMap = null;
 let scores = {};           // playerId -> number of wins
+let readyCountdownTimer = null; // timer for ready-based start
 let rematchVotes = new Set();
 let roundEndTimer = null;  // 5-second auto-restart timer
+let powerUps = [];         // { id, x, y, type, angle }
+let missiles = [];         // { id, ownerId, x, y, vx, vy, targetId, retargetTimer, lifetime }
+let nextPowerUpId = 1;
+let nextMissileId = 1;
+let powerUpSpawnTimer = 0;
 
 // --- Color Assignment ---
 function assignColor(playerIndex) {
@@ -83,7 +123,7 @@ function hslToHex(h, s, l) {
 
 // --- Map Generation ---
 function generateMap(playerCount) {
-  const size = 6 + 3 * playerCount;
+  const size = cfg.gridBaseSize + cfg.gridPerPlayer * playerCount;
   const rows = size;
   const cols = size;
 
@@ -181,7 +221,7 @@ function generateMap(playerCount) {
     const j = Math.floor(Math.random() * (i + 1));
     [interiorWalls[i], interiorWalls[j]] = [interiorWalls[j], interiorWalls[i]];
   }
-  const removeCount = Math.floor(interiorWalls.length * 0.32);
+  const removeCount = Math.floor(interiorWalls.length * cfg.wallRemovalPercent);
   for (let i = 0; i < removeCount; i++) {
     const w = interiorWalls[i];
     if (w.type === 'h') {
@@ -308,6 +348,116 @@ function bfsDistance(map, startCol, startRow, endCol, endRow) {
   }
 
   return Infinity; // unreachable (shouldn't happen in a connected maze)
+}
+
+// --- BFS next waypoint (for missile pathfinding) ---
+function bfsNextWaypoint(map, fromX, fromY, toX, toY) {
+  const { rows, cols, hWalls, vWalls } = map;
+  const sr = Math.max(0, Math.min(rows - 1, Math.floor(fromY)));
+  const sc = Math.max(0, Math.min(cols - 1, Math.floor(fromX)));
+  const er = Math.max(0, Math.min(rows - 1, Math.floor(toY)));
+  const ec = Math.max(0, Math.min(cols - 1, Math.floor(toX)));
+
+  if (sr === er && sc === ec) {
+    return { x: toX, y: toY };
+  }
+
+  const visited = [];
+  const parent = [];
+  for (let r = 0; r < rows; r++) {
+    visited[r] = new Array(cols).fill(false);
+    parent[r] = new Array(cols).fill(null);
+  }
+
+  const queue = [[sr, sc]];
+  visited[sr][sc] = true;
+  let found = false;
+
+  while (queue.length > 0) {
+    const [cr, cc] = queue.shift();
+    if (cr === er && cc === ec) { found = true; break; }
+
+    if (cr > 0 && !visited[cr - 1][cc] && !hWalls[cr][cc]) {
+      visited[cr - 1][cc] = true;
+      parent[cr - 1][cc] = [cr, cc];
+      queue.push([cr - 1, cc]);
+    }
+    if (cr < rows - 1 && !visited[cr + 1][cc] && !hWalls[cr + 1][cc]) {
+      visited[cr + 1][cc] = true;
+      parent[cr + 1][cc] = [cr, cc];
+      queue.push([cr + 1, cc]);
+    }
+    if (cc > 0 && !visited[cr][cc - 1] && !vWalls[cr][cc]) {
+      visited[cr][cc - 1] = true;
+      parent[cr][cc - 1] = [cr, cc];
+      queue.push([cr, cc - 1]);
+    }
+    if (cc < cols - 1 && !visited[cr][cc + 1] && !vWalls[cr][cc + 1]) {
+      visited[cr][cc + 1] = true;
+      parent[cr][cc + 1] = [cr, cc];
+      queue.push([cr, cc + 1]);
+    }
+  }
+
+  if (!found) return { x: toX, y: toY };
+
+  let cur = [er, ec];
+  while (parent[cur[0]][cur[1]]) {
+    const p = parent[cur[0]][cur[1]];
+    if (p[0] === sr && p[1] === sc) break;
+    cur = p;
+  }
+
+  return { x: cur[1] + 0.5, y: cur[0] + 0.5 };
+}
+
+// --- Missile target selection ---
+function selectMissileTarget(missile, map) {
+  let bestTarget = null;
+  let bestScore = Infinity;
+
+  for (const [id, player] of players) {
+    if (!player.alive) continue;
+    const bfsDist = bfsDistance(map, missile.x, missile.y, player.x, player.y);
+    const eucDist = Math.hypot(missile.x - player.x, missile.y - player.y);
+    const score = bfsDist * 10 + eucDist;
+    if (score < bestScore) {
+      bestScore = score;
+      bestTarget = id;
+    }
+  }
+  return bestTarget;
+}
+
+// --- Power-up spawning ---
+function spawnPowerUp(map) {
+  const { rows, cols } = map;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const c = Math.floor(Math.random() * cols);
+    const r = Math.floor(Math.random() * rows);
+    const x = c + 0.5;
+    const y = r + 0.5;
+
+    let tooClose = false;
+    for (const [id, player] of players) {
+      if (!player.alive) continue;
+      if (Math.hypot(x - player.x, y - player.y) < 2) { tooClose = true; break; }
+    }
+    if (!tooClose) {
+      for (const pu of powerUps) {
+        if (Math.hypot(x - pu.x, y - pu.y) < 2) { tooClose = true; break; }
+      }
+    }
+    if (!tooClose) {
+      powerUps.push({
+        id: nextPowerUpId++,
+        x, y,
+        type: 'missile',
+        angle: Math.random() * Math.PI * 2,
+      });
+      return;
+    }
+  }
 }
 
 // --- Spawn Players ---
@@ -519,107 +669,87 @@ function closestPointOnSegment(px, py, x1, y1, x2, y2) {
 // returns the spawn position BEFORE the wall (offset by bulletRadius)
 // and which wall type was hit.
 // Returns {x, y, type: 'h'|'v'} or null if path is clear.
-function raycastBulletSpawn(x1, y1, x2, y2, bulletRadius, map) {
+// Find the first wall a bullet circle collides with near a point.
+// Returns { type: 'h'|'v', wx1, wy1, wx2, wy2 } or null.
+function findFirstWallCollision(px, py, radius, map) {
   const { rows, cols, hWalls, vWalls } = map;
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-  if (dist < 0.001) return null;
+  const minRow = Math.max(0, Math.floor(py - radius - 1));
+  const maxRow = Math.min(rows, Math.ceil(py + radius + 1));
+  const minCol = Math.max(0, Math.floor(px - radius - 1));
+  const maxCol = Math.min(cols, Math.ceil(px + radius + 1));
 
-  // Collect all wall crossings along the ray, find the earliest one.
-  let bestT = Infinity;
-  let bestType = null;
-  let bestWallPos = 0;
-
-  // Check all horizontal walls the ray might cross.
-  // A horizontal wall at y=R spans x=[C, C+1].
-  // The ray crosses y=R when t = (R - y1) / dy.
-  if (Math.abs(dy) > 0.0001) {
-    // Determine which horizontal grid lines we cross
-    const yStart = Math.min(y1, y2);
-    const yEnd = Math.max(y1, y2);
-    const rowMin = Math.ceil(Math.min(y1, y2));
-    const rowMax = Math.floor(Math.max(y1, y2));
-    for (let R = rowMin; R <= rowMax; R++) {
-      if (R < 0 || R > rows) continue;
-      const t = (R - y1) / dy;
-      if (t < 0.001 || t > 1 || t >= bestT) continue; // skip origin, out of range, or not better
-      const crossX = x1 + dx * t;
-      const C = Math.floor(crossX);
-      if (C >= 0 && C < cols && hWalls[R] && hWalls[R][C]) {
-        bestT = t;
-        bestType = 'h';
-        bestWallPos = R;
-      }
-    }
-  }
-
-  // Check all vertical walls the ray might cross.
-  // A vertical wall at x=C spans y=[R, R+1].
-  // The ray crosses x=C when t = (C - x1) / dx.
-  if (Math.abs(dx) > 0.0001) {
-    const colMin = Math.ceil(Math.min(x1, x2));
-    const colMax = Math.floor(Math.max(x1, x2));
-    for (let C = colMin; C <= colMax; C++) {
-      if (C < 0 || C > cols) continue;
-      const t = (C - x1) / dx;
-      if (t < 0.001 || t > 1 || t >= bestT) continue;
-      const crossY = y1 + dy * t;
-      const R = Math.floor(crossY);
-      if (R >= 0 && R < rows && vWalls[R] && vWalls[R][C]) {
-        bestT = t;
-        bestType = 'v';
-        bestWallPos = C;
-      }
-    }
-  }
-
-  if (bestType === null) return null; // clear path
-
-  // Spawn bullet BEFORE the wall, offset by bullet radius
-  const hitX = x1 + dx * bestT;
-  const hitY = y1 + dy * bestT;
-
-  if (bestType === 'h') {
-    // Horizontal wall at y=bestWallPos. Push bullet back to the tank's side.
-    const spawnY = bestWallPos + ((y1 < bestWallPos) ? -bulletRadius : bulletRadius);
-    return { x: hitX, y: spawnY, type: 'h' };
-  } else {
-    // Vertical wall at x=bestWallPos. Push bullet back to the tank's side.
-    const spawnX = bestWallPos + ((x1 < bestWallPos) ? -bulletRadius : bulletRadius);
-    return { x: spawnX, y: hitY, type: 'v' };
-  }
-}
-
-// Check if position is inside a wall (for bullet spawn check)
-function isInsideWall(px, py, radius, map) {
-  const { rows, cols, hWalls, vWalls } = map;
-  const minRow = Math.max(0, Math.floor(py - 1));
-  const maxRow = Math.min(rows, Math.floor(py + 1) + 1);
-  const minCol = Math.max(0, Math.floor(px - 1));
-  const maxCol = Math.min(cols, Math.floor(px + 1) + 1);
+  let bestDist = Infinity;
+  let bestWall = null;
 
   for (let row = minRow; row <= maxRow; row++) {
     for (let c = minCol; c <= maxCol; c++) {
       // Check horizontal walls
       if (row <= rows && c < cols && hWalls[row] && hWalls[row][c]) {
-        if (circleCollidesSegment(px, py, radius, c, row, c + 1, row)) return true;
+        if (circleCollidesSegment(px, py, radius, c, row, c + 1, row)) {
+          const d = Math.abs(py - row);
+          if (d < bestDist) { bestDist = d; bestWall = { type: 'h' }; }
+        }
       }
       // Check vertical walls
-      if (row < rows && c <= cols && vWalls[row] && vWalls[row][c] !== undefined) {
-        if (vWalls[row][c] && circleCollidesSegment(px, py, radius, c, row, c, row + 1)) return true;
+      if (row < rows && c <= cols && vWalls[row] && vWalls[row][c]) {
+        if (circleCollidesSegment(px, py, radius, c, row, c, row + 1)) {
+          const d = Math.abs(px - c);
+          if (d < bestDist) { bestDist = d; bestWall = { type: 'v' }; }
+        }
       }
     }
   }
-  return false;
+  return bestWall;
+}
+
+// Step along the ray from tank center to barrel tip, checking bullet circle
+// collision at each step. Returns { x, y, type } if a wall blocks the path.
+function raycastBulletSpawn(x1, y1, x2, y2, bulletRadius, map) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 0.001) return null;
+
+  const STEP = 0.02; // step size in cells (< 1/3 wall width)
+  const numSteps = Math.ceil(dist / STEP);
+
+  for (let i = 1; i <= numSteps; i++) {
+    const t = Math.min(i / numSteps, 1.0);
+    const px = x1 + dx * t;
+    const py = y1 + dy * t;
+
+    const wallHit = findFirstWallCollision(px, py, bulletRadius, map);
+    if (wallHit) {
+      // Step back to the previous position (safe side of wall)
+      const prevT = Math.max((i - 1) / numSteps, 0.0);
+      let spawnX = x1 + dx * prevT;
+      let spawnY = y1 + dy * prevT;
+
+      // If prevT is 0 (first step hit wall), use tank center offset slightly
+      if (prevT < 0.001) {
+        spawnX = x1;
+        spawnY = y1;
+      }
+
+      return { x: spawnX, y: spawnY, type: wallHit.type };
+    }
+  }
+
+  return null; // clear path to barrel tip
 }
 
 let frameHits = []; // [{x, y}] - bullet impact positions this tick
+let frameDeaths = []; // [{x, y, color}] - tank death positions this tick
+let lastTickTime = 0;
 
 function tick() {
   if (!currentMap) return;
+  const now = performance.now();
+  const DT = lastTickTime ? Math.min((now - lastTickTime) / 1000, 0.05) : 1 / 60; // cap at 50ms
+  lastTickTime = now;
   const map = currentMap;
   frameHits = [];
+  frameDeaths = [];
 
   // --- Tank Movement ---
   for (const [id, player] of players) {
@@ -647,130 +777,214 @@ function tick() {
       player.y = resolved.y;
     }
 
-    // --- Bullet Firing (edge trigger) ---
+    // --- Firing (edge trigger) ---
     if (keys.space && !player.spacePrev) {
-      // Check if player has no active bullet
-      const hasActiveBullet = bullets.some(b => b.ownerId === id);
-      if (!hasActiveBullet) {
+      if (player.hasMissile) {
+        // Fire missile instead of bullet
         const cosA = Math.cos(player.angle);
         const sinA = Math.sin(player.angle);
-        let bdx = cosA * BULLET_SPEED;
-        let bdy = sinA * BULLET_SPEED;
-
-        // Raycast from tank center toward barrel tip to find first wall hit
-        const spawnDist = 0.35;
-        const tipX = player.x + cosA * spawnDist;
-        const tipY = player.y + sinA * spawnDist;
-        const hit = raycastBulletSpawn(player.x, player.y, tipX, tipY, BULLET_RADIUS, map);
-
-        let bx, by;
-        if (hit) {
-          // Wall is in the way — spawn at hit point and bounce off it
-          bx = hit.x;
-          by = hit.y;
-          if (hit.type === 'h') {
-            bdy = -bdy; // reflect off horizontal wall
-          } else {
-            bdx = -bdx; // reflect off vertical wall
-          }
-        } else {
-          // Clear path — spawn at barrel tip
-          bx = tipX;
-          by = tipY;
-        }
-
-        bullets.push({
+        const spawnDist = cfg.barrelLength + 0.15;
+        missiles.push({
+          id: nextMissileId++,
           ownerId: id,
-          x: bx,
-          y: by,
-          dx: bdx,
-          dy: bdy,
-          bouncesLeft: hit ? MAX_BOUNCES - 1 : MAX_BOUNCES,
+          x: player.x + cosA * spawnDist,
+          y: player.y + sinA * spawnDist,
+          vx: cosA * MISSILE_SPEED,
+          vy: sinA * MISSILE_SPEED,
+          targetId: null,
+          retargetTimer: 0,
+          lifetime: MISSILE_LIFETIME,
+          armTimer: 0.6, // travel straight for 0.6s before activating targeting
         });
+        player.hasMissile = false;
+      } else {
+        // Check if player has no active bullet
+        const hasActiveBullet = bullets.some(b => b.ownerId === id);
+        if (!hasActiveBullet) {
+          const cosA = Math.cos(player.angle);
+          const sinA = Math.sin(player.angle);
+          let bdx = cosA * BULLET_SPEED;
+          let bdy = sinA * BULLET_SPEED;
 
-        if (hit) {
-          frameHits.push({ x: bx, y: by });
+          // Raycast from tank center toward barrel tip to find first wall hit
+          const spawnDist = cfg.barrelLength;
+          const tipX = player.x + cosA * spawnDist;
+          const tipY = player.y + sinA * spawnDist;
+          const hit = raycastBulletSpawn(player.x, player.y, tipX, tipY, BULLET_RADIUS, map);
+
+          let bx, by;
+          if (hit) {
+            bx = hit.x;
+            by = hit.y;
+            if (hit.type === 'h') {
+              bdy = -bdy;
+            } else {
+              bdx = -bdx;
+            }
+          } else {
+            bx = tipX;
+            by = tipY;
+          }
+
+          bullets.push({
+            ownerId: id,
+            x: bx,
+            y: by,
+            dx: bdx,
+            dy: bdy,
+            bouncesLeft: hit ? MAX_BOUNCES - 1 : MAX_BOUNCES,
+          });
+
+          if (hit) {
+            frameHits.push({ x: bx, y: by });
+          }
         }
       }
     }
     player.spacePrev = keys.space;
   }
 
-  // --- Bullet Movement & Wall Bouncing ---
+  // --- Bullet Movement & Wall Bouncing (substep + normal-based reflection) ---
+  // Wall segments are inset at perpendicular corners so bullets hit the flat
+  // face of the wall rather than the shared corner point (which would reflect
+  // back toward the shooter instead of at the correct angle).
+  const WALL_INSET = 0.06;
+
+  // Find closest point on segment to circle center, return {cx, cy, dist}
+  function closestPointOnSeg(px, py, x1, y1, x2, y2) {
+    const abx = x2 - x1, aby = y2 - y1;
+    const acx = px - x1, acy = py - y1;
+    const ab2 = abx * abx + aby * aby;
+    const t = ab2 === 0 ? 0 : Math.max(0, Math.min(1, (acx * abx + acy * aby) / ab2));
+    const cx = x1 + t * abx, cy = y1 + t * aby;
+    return { cx, cy, dist: Math.hypot(px - cx, py - cy) };
+  }
+
+  // Check if a perpendicular wall exists at a horizontal wall's endpoint
+  function hWallHasCorner(row, col, hWalls, vWalls, rows, cols) {
+    // col is the x-coordinate of the endpoint. Check vertical walls meeting there.
+    if (col >= 0 && col <= cols) {
+      // vWall above: vWalls[row-1][col] spans (col, row-1) to (col, row)
+      if (row > 0 && vWalls[row - 1] && vWalls[row - 1][col]) return true;
+      // vWall below: vWalls[row][col] spans (col, row) to (col, row+1)
+      if (row < rows && vWalls[row] && vWalls[row][col]) return true;
+    }
+    return false;
+  }
+
+  // Check if a perpendicular wall exists at a vertical wall's endpoint
+  function vWallHasCorner(row, col, hWalls, vWalls, rows, cols) {
+    // row is the y-coordinate of the endpoint. Check horizontal walls meeting there.
+    if (row >= 0 && row <= rows) {
+      // hWall to left: hWalls[row][col-1] spans (col-1, row) to (col, row)
+      if (col > 0 && hWalls[row] && hWalls[row][col - 1]) return true;
+      // hWall to right: hWalls[row][col] spans (col, row) to (col+1, row)
+      if (col < cols && hWalls[row] && hWalls[row][col]) return true;
+    }
+    return false;
+  }
+
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
-    b.x += b.dx * DT;
-    b.y += b.dy * DT;
-
     const { rows, cols, hWalls, vWalls } = map;
 
-    // Check wall collisions
-    let hitH = false;
-    let hitV = false;
-    let pushRow = 0;
-    let pushCol = 0;
+    // Substep: steps no larger than ~90% of bullet radius
+    const moveX = b.dx * DT;
+    const moveY = b.dy * DT;
+    const moveDist = Math.sqrt(moveX * moveX + moveY * moveY);
+    const maxStep = BULLET_RADIUS * 0.9;
+    const numSteps = Math.max(1, Math.ceil(moveDist / maxStep));
+    const stepX = moveX / numSteps;
+    const stepY = moveY / numSteps;
 
-    const minRow = Math.max(0, Math.floor(b.y - 1));
-    const maxRow = Math.min(rows, Math.floor(b.y + 1) + 1);
-    const minCol = Math.max(0, Math.floor(b.x - 1));
-    const maxCol = Math.min(cols, Math.floor(b.x + 1) + 1);
+    let destroyed = false;
+    for (let step = 0; step < numSteps; step++) {
+      b.x += stepX;
+      b.y += stepY;
 
-    // Check horizontal walls
-    for (let row = minRow; row <= maxRow && !hitH; row++) {
-      for (let c = minCol; c <= Math.min(cols - 1, maxCol); c++) {
-        if (row > rows || c >= cols) continue;
-        if (!hWalls[row] || !hWalls[row][c]) continue;
-        if (circleCollidesSegment(b.x, b.y, BULLET_RADIUS, c, row, c + 1, row)) {
-          hitH = true;
-          pushRow = row;
+      // Find the deepest penetrating wall collision
+      let bestDist = Infinity;
+      let bestCx = 0, bestCy = 0; // closest point on wall to bullet center
+
+      const minRow = Math.max(0, Math.floor(b.y - 1));
+      const maxRow = Math.min(rows, Math.floor(b.y + 1) + 1);
+      const minCol = Math.max(0, Math.floor(b.x - 1));
+      const maxCol = Math.min(cols, Math.floor(b.x + 1) + 1);
+
+      // Horizontal walls
+      for (let row = minRow; row <= maxRow; row++) {
+        for (let c = minCol; c <= Math.min(cols - 1, maxCol); c++) {
+          if (row > rows || c >= cols) continue;
+          if (!hWalls[row] || !hWalls[row][c]) continue;
+          // Inset at corners with perpendicular walls
+          const li = hWallHasCorner(row, c, hWalls, vWalls, rows, cols) ? WALL_INSET : 0;
+          const ri = hWallHasCorner(row, c + 1, hWalls, vWalls, rows, cols) ? WALL_INSET : 0;
+          const cp = closestPointOnSeg(b.x, b.y, c + li, row, c + 1 - ri, row);
+          if (cp.dist < BULLET_RADIUS && cp.dist < bestDist) {
+            bestDist = cp.dist;
+            bestCx = cp.cx;
+            bestCy = cp.cy;
+          }
+        }
+      }
+
+      // Vertical walls
+      for (let c = minCol; c <= maxCol; c++) {
+        for (let row = minRow; row <= Math.min(rows - 1, maxRow); row++) {
+          if (c > cols || row >= rows) continue;
+          if (!vWalls[row] || !vWalls[row][c]) continue;
+          // Inset at corners with perpendicular walls
+          const ti = vWallHasCorner(row, c, hWalls, vWalls, rows, cols) ? WALL_INSET : 0;
+          const bi = vWallHasCorner(row + 1, c, hWalls, vWalls, rows, cols) ? WALL_INSET : 0;
+          const cp = closestPointOnSeg(b.x, b.y, c, row + ti, c, row + 1 - bi);
+          if (cp.dist < BULLET_RADIUS && cp.dist < bestDist) {
+            bestDist = cp.dist;
+            bestCx = cp.cx;
+            bestCy = cp.cy;
+          }
+        }
+      }
+
+      if (bestDist < BULLET_RADIUS) {
+        frameHits.push({ x: b.x, y: b.y });
+        b.bouncesLeft--;
+        if (b.bouncesLeft < 0) {
+          bullets.splice(i, 1);
+          destroyed = true;
           break;
         }
-      }
-    }
 
-    // Check vertical walls
-    for (let c = minCol; c <= maxCol && !hitV; c++) {
-      for (let row = minRow; row <= Math.min(rows - 1, maxRow); row++) {
-        if (c > cols || row >= rows) continue;
-        if (!vWalls[row] || vWalls[row][c] === undefined || !vWalls[row][c]) continue;
-        if (circleCollidesSegment(b.x, b.y, BULLET_RADIUS, c, row, c, row + 1)) {
-          hitV = true;
-          pushCol = c;
-          break;
-        }
-      }
-    }
-
-    if (hitH || hitV) {
-      frameHits.push({ x: b.x, y: b.y });
-      b.bouncesLeft--;
-      if (b.bouncesLeft < 0) {
-        // Destroy bullet
-        bullets.splice(i, 1);
-        continue;
-      }
-
-      if (hitH) {
-        b.dy = -b.dy;
-        // Push out of horizontal wall
-        if (b.y < pushRow) {
-          b.y = pushRow - BULLET_RADIUS;
+        // Normal: from closest wall point toward bullet center
+        let nx = b.x - bestCx;
+        let ny = b.y - bestCy;
+        const nLen = Math.hypot(nx, ny);
+        if (nLen > 0.0001) {
+          nx /= nLen;
+          ny /= nLen;
         } else {
-          b.y = pushRow + BULLET_RADIUS;
+          // Bullet center is exactly on the wall — use velocity to determine push direction
+          nx = -b.dx;
+          ny = -b.dy;
+          const vLen = Math.hypot(nx, ny);
+          if (vLen > 0) { nx /= vLen; ny /= vLen; }
         }
-      }
-      if (hitV) {
-        b.dx = -b.dx;
-        // Push out of vertical wall
-        if (b.x < pushCol) {
-          b.x = pushCol - BULLET_RADIUS;
-        } else {
-          b.x = pushCol + BULLET_RADIUS;
-        }
+
+        // Reflect velocity: v' = v - 2(v·n)n
+        const dot = b.dx * nx + b.dy * ny;
+        b.dx -= 2 * dot * nx;
+        b.dy -= 2 * dot * ny;
+
+        // Push bullet out of wall along normal
+        b.x = bestCx + nx * BULLET_RADIUS;
+        b.y = bestCy + ny * BULLET_RADIUS;
+
+        // After a bounce, skip remaining substeps (prevents double-bounce glitches)
+        break;
       }
     }
+    if (destroyed) continue;
 
-    // Safety clamp (outer walls already handled above, but prevent escape)
+    // Safety clamp
     b.x = Math.max(BULLET_RADIUS, Math.min(cols - BULLET_RADIUS, b.x));
     b.y = Math.max(BULLET_RADIUS, Math.min(rows - BULLET_RADIUS, b.y));
   }
@@ -787,11 +1001,167 @@ function tick() {
         player.hp--;
         if (player.hp <= 0) {
           player.alive = false;
+          frameDeaths.push({ x: player.x, y: player.y, color: player.color });
         }
         bullets.splice(i, 1);
         break; // bullet is gone, move to next
       }
     }
+  }
+
+  // --- Power-up spawning ---
+  powerUpSpawnTimer -= DT;
+  if (powerUpSpawnTimer <= 0 && powerUps.length < MAX_POWERUPS) {
+    spawnPowerUp(map);
+    powerUpSpawnTimer = POWERUP_SPAWN_INTERVAL;
+  }
+
+  // --- Power-up pickup ---
+  for (let i = powerUps.length - 1; i >= 0; i--) {
+    const pu = powerUps[i];
+    for (const [id, player] of players) {
+      if (!player.alive) continue;
+      if (player.hasMissile) continue; // already holding one
+      const dist = Math.hypot(pu.x - player.x, pu.y - player.y);
+      if (dist < POWERUP_RADIUS + TANK_RADIUS) {
+        player.hasMissile = true;
+        powerUps.splice(i, 1);
+        break;
+      }
+    }
+  }
+
+  // --- Missile update ---
+  for (let i = missiles.length - 1; i >= 0; i--) {
+    const m = missiles[i];
+    m.lifetime -= DT;
+    if (m.lifetime <= 0) {
+      frameDeaths.push({ x: m.x, y: m.y, color: '#888888' });
+      missiles.splice(i, 1);
+      continue;
+    }
+
+    // Arm timer — travel straight like a bullet before activating
+    const armed = m.armTimer <= 0;
+    if (!armed) {
+      m.armTimer -= DT;
+    }
+
+    if (armed) {
+      // Retarget
+      m.retargetTimer -= DT;
+      if (m.retargetTimer <= 0 || m.targetId === null) {
+        m.targetId = selectMissileTarget(m, map);
+        m.retargetTimer = MISSILE_RETARGET_INTERVAL;
+      }
+
+      // Validate target
+      if (m.targetId !== null) {
+        const target = players.get(m.targetId);
+        if (!target || !target.alive) {
+          m.targetId = selectMissileTarget(m, map);
+          m.retargetTimer = MISSILE_RETARGET_INTERVAL;
+        }
+      }
+
+      // No targets left — self-destruct
+      if (m.targetId === null) {
+        frameDeaths.push({ x: m.x, y: m.y, color: '#888888' });
+        missiles.splice(i, 1);
+        continue;
+      }
+
+      // Steer toward target via BFS pathfinding
+      const target = players.get(m.targetId);
+      if (target) {
+        const waypoint = bfsNextWaypoint(map, m.x, m.y, target.x, target.y);
+        const dx = waypoint.x - m.x;
+        const dy = waypoint.y - m.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > 0.01) {
+          const ndx = dx / dist;
+          const ndy = dy / dist;
+
+          // Decompose velocity into parallel (along desired) and perpendicular
+          const dot = m.vx * ndx + m.vy * ndy;
+          const perpX = m.vx - dot * ndx;
+          const perpY = m.vy - dot * ndy;
+
+          // Dampen perpendicular component — actively sheds wrong-direction momentum
+          const perpDamp = Math.max(0, 1 - 4 * DT);
+          m.vx = dot * ndx + perpX * perpDamp;
+          m.vy = dot * ndy + perpY * perpDamp;
+
+          // Accelerate toward desired direction
+          m.vx += ndx * MISSILE_ACCEL * DT;
+          m.vy += ndy * MISSILE_ACCEL * DT;
+        }
+      }
+    }
+
+    // Clamp speed
+    const speed = Math.hypot(m.vx, m.vy);
+    if (speed > MISSILE_SPEED) {
+      m.vx *= MISSILE_SPEED / speed;
+      m.vy *= MISSILE_SPEED / speed;
+    }
+
+    // Move
+    m.x += m.vx * DT;
+    m.y += m.vy * DT;
+
+    // Wall collision (bounce while unarmed, resolve while armed)
+    if (!armed) {
+      // Bounce off walls like a bullet during arm phase
+      const wallHit = findFirstWallCollision(m.x, m.y, MISSILE_RADIUS, map);
+      if (wallHit) {
+        if (wallHit.type === 'h') m.vy = -m.vy;
+        else m.vx = -m.vx;
+        const resolved = resolveTankCollision(m.x, m.y, MISSILE_RADIUS, map);
+        m.x = resolved.x;
+        m.y = resolved.y;
+      }
+    } else {
+      const oldMx = m.x, oldMy = m.y;
+      const resolved = resolveTankCollision(m.x, m.y, MISSILE_RADIUS, map);
+      m.x = resolved.x;
+      m.y = resolved.y;
+
+      // If wall pushed the missile, cancel velocity going into that wall
+      const pushX = m.x - oldMx;
+      const pushY = m.y - oldMy;
+      const pushDist = Math.hypot(pushX, pushY);
+      if (pushDist > 0.001) {
+        const nx = pushX / pushDist;
+        const ny = pushY / pushDist;
+        const vDot = m.vx * nx + m.vy * ny;
+        if (vDot < 0) {
+          m.vx -= vDot * nx;
+          m.vy -= vDot * ny;
+        }
+      }
+    }
+
+    // Tank collision (only when armed)
+    let missileDestroyed = false;
+    if (armed) {
+      for (const [id, player] of players) {
+        if (!player.alive) continue;
+        const dist = Math.hypot(m.x - player.x, m.y - player.y);
+        if (dist < MISSILE_RADIUS + TANK_RADIUS) {
+          player.hp--;
+          if (player.hp <= 0) {
+            player.alive = false;
+            frameDeaths.push({ x: player.x, y: player.y, color: player.color });
+          }
+          frameHits.push({ x: m.x, y: m.y });
+          missiles.splice(i, 1);
+          missileDestroyed = true;
+          break;
+        }
+      }
+    }
+    if (missileDestroyed) continue;
   }
 
   // --- Round End Check ---
@@ -856,13 +1226,17 @@ function endRound(winnerId) {
     } else {
       gameState = 'lobby';
       console.log('Not enough players for new round. Returning to lobby.');
+      broadcastLobby();
     }
-  }, 5000);
+  }, cfg.roundEndDelay);
 }
 
 function startNewRound() {
   gameState = 'playing';
   bullets = [];
+  powerUps = [];
+  missiles = [];
+  powerUpSpawnTimer = POWERUP_SPAWN_INTERVAL;
   currentMap = generateMap(players.size);
   const spawns = spawnPlayers(currentMap, players);
   debugPrintMap(currentMap, spawns);
@@ -872,12 +1246,13 @@ function startNewRound() {
     player.hp = TANK_HP;
     player.alive = true;
     player.spacePrev = false;
+    player.hasMissile = false;
   }
 
   // Build spawns array for broadcast
   const spawnsArr = [];
   for (const [id, player] of players) {
-    spawnsArr.push({ id, x: player.x, y: player.y, angle: player.angle, color: player.color });
+    spawnsArr.push({ id, name: player.name, x: player.x, y: player.y, angle: player.angle, color: player.color });
   }
 
   // Broadcast newRound
@@ -892,6 +1267,7 @@ function startNewRound() {
     }
   }
 
+  lastTickTime = 0;
   tickInterval = setInterval(tick, 1000 / TICK_RATE);
   console.log(`New round started with ${players.size} player(s).`);
 }
@@ -907,6 +1283,8 @@ function broadcastState() {
       hp: player.hp,
       alive: player.alive,
       color: player.color,
+      name: player.name,
+      hasMissile: player.hasMissile || false,
     });
   }
 
@@ -923,6 +1301,22 @@ function broadcastState() {
   };
   if (frameHits.length > 0) {
     stateObj.hits = frameHits;
+  }
+  if (frameDeaths.length > 0) {
+    stateObj.deaths = frameDeaths;
+  }
+  if (powerUps.length > 0) {
+    stateObj.powerUps = powerUps.map(pu => ({
+      id: pu.id, x: pu.x, y: pu.y, type: pu.type, angle: pu.angle,
+    }));
+  }
+  if (missiles.length > 0) {
+    stateObj.missiles = missiles.map(m => ({
+      id: m.id, x: m.x, y: m.y,
+      angle: Math.atan2(m.vy, m.vx),
+      ownerId: m.ownerId,
+      targetId: m.targetId,
+    }));
   }
   const msg = JSON.stringify(stateObj);
 
@@ -942,6 +1336,85 @@ function getColorsMap() {
   return colors;
 }
 
+function getLobbyState() {
+  const lobbyPlayers = [];
+  for (const [id, player] of players) {
+    lobbyPlayers.push({ id, name: player.name, color: player.color, ready: player.ready });
+  }
+  return lobbyPlayers;
+}
+
+function broadcastLobby() {
+  const msg = JSON.stringify({
+    type: 'lobby',
+    players: getLobbyState(),
+    maxPlayers: MAX_PLAYERS,
+  });
+  for (const [id, player] of players) {
+    if (player.ws.readyState === 1) {
+      player.ws.send(msg);
+    }
+  }
+}
+
+function checkReadyState() {
+  if (gameState !== 'lobby') return;
+  if (players.size < 2) {
+    // Cancel any pending countdown
+    if (readyCountdownTimer) {
+      clearTimeout(readyCountdownTimer);
+      readyCountdownTimer = null;
+      broadcastLobby();
+    }
+    return;
+  }
+
+  const readyCount = Array.from(players.values()).filter(p => p.ready).length;
+  const total = players.size;
+
+  // All ready → start instantly
+  if (readyCount === total) {
+    if (readyCountdownTimer) {
+      clearTimeout(readyCountdownTimer);
+      readyCountdownTimer = null;
+    }
+    console.log('All players ready. Starting immediately.');
+    startGame();
+    return;
+  }
+
+  // Threshold met → start countdown (if not already running)
+  if (readyCount / total >= READY_THRESHOLD) {
+    if (!readyCountdownTimer) {
+      console.log(`${readyCount}/${total} ready (>= ${(READY_THRESHOLD * 100).toFixed(0)}%). Starting countdown.`);
+      const countdownStart = Date.now();
+      // Broadcast countdown start
+      const msg = JSON.stringify({ type: 'readyCountdown', endsAt: countdownStart + READY_COUNTDOWN_MS });
+      for (const [id, p] of players) {
+        if (p.ws.readyState === 1) p.ws.send(msg);
+      }
+      readyCountdownTimer = setTimeout(() => {
+        readyCountdownTimer = null;
+        if (gameState === 'lobby' && players.size >= 2) {
+          console.log('Ready countdown finished. Starting game.');
+          startGame();
+        }
+      }, READY_COUNTDOWN_MS);
+    }
+  } else {
+    // Below threshold → cancel countdown
+    if (readyCountdownTimer) {
+      clearTimeout(readyCountdownTimer);
+      readyCountdownTimer = null;
+      console.log('Ready count dropped below threshold. Countdown cancelled.');
+      const msg = JSON.stringify({ type: 'readyCountdown', endsAt: null });
+      for (const [id, p] of players) {
+        if (p.ws.readyState === 1) p.ws.send(msg);
+      }
+    }
+  }
+}
+
 // --- HTTP Server ---
 const server = http.createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/') {
@@ -958,66 +1431,118 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws) => {
-  const playerId = nextPlayerId++;
-  const colorIndex = players.size;
-  const color = assignColor(colorIndex);
+  let playerId = null;
+  let joined = false;
 
-  players.set(playerId, {
-    ws,
-    color,
-    input: { w: false, a: false, s: false, d: false, space: false },
-    alive: true,
-    hp: TANK_HP,
-    x: 0,
-    y: 0,
-    angle: 0,
-    spacePrev: false,
-    msgTimestamps: [],
-  });
-
-  // Initialize score if not present
-  if (scores[playerId] === undefined) {
-    scores[playerId] = 0;
-  }
-
-  console.log(`Player ${playerId} connected (${color}). Total: ${players.size}`);
-
-  // Send init message
+  // Send welcome with server info (before join)
   ws.send(JSON.stringify({
-    type: 'init',
-    playerId,
-    colors: getColorsMap(),
+    type: 'welcome',
+    maxPlayers: MAX_PLAYERS,
+    currentPlayers: players.size,
+    gameState,
   }));
 
-  // Notify existing players about the new color map
-  const colorsUpdate = JSON.stringify({ type: 'playerJoined', colors: getColorsMap() });
-  for (const [id, player] of players) {
-    if (id !== playerId && player.ws.readyState === 1) {
-      player.ws.send(colorsUpdate);
-    }
-  }
-
   ws.on('message', (data) => {
-    const player = players.get(playerId);
-    if (!player) return;
-
-    // Rate limiting: 120 msg/s
-    const now = Date.now();
-    player.msgTimestamps.push(now);
-    // Keep only timestamps from the last second
-    player.msgTimestamps = player.msgTimestamps.filter(t => now - t < 1000);
-    if (player.msgTimestamps.length > MSG_RATE_LIMIT) {
-      return; // drop excess
-    }
-
     let msg;
     try {
       msg = JSON.parse(data);
     } catch {
       return;
     }
-
     if (!msg || !msg.type) return;
+
+    // --- Join message (registers the player) ---
+    if (msg.type === 'join' && !joined) {
+      if (players.size >= MAX_PLAYERS) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Server is full.' }));
+        ws.close();
+        return;
+      }
+
+      let name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim().slice(0, 16) : null;
+
+      // Ensure unique name
+      const takenNames = new Set(Array.from(players.values()).map(p => p.name.toLowerCase()));
+      if (!name || takenNames.has(name.toLowerCase())) {
+        ws.send(JSON.stringify({ type: 'error', message: 'That name is already taken.' }));
+        return;
+      }
+
+      // All validation passed — commit
+      playerId = 1;
+      while (players.has(playerId)) playerId++;
+      joined = true;
+
+      // Assign lowest unused color index
+      const usedColorIndices = new Set(Array.from(players.values()).map(p => p.colorIndex));
+      let colorIndex = 0;
+      while (usedColorIndices.has(colorIndex)) colorIndex++;
+      const color = assignColor(colorIndex);
+
+      const joinedMidMatch = gameState === 'playing';
+
+      players.set(playerId, {
+        ws,
+        color,
+        colorIndex,
+        name,
+        ready: false,
+        input: { w: false, a: false, s: false, d: false, space: false },
+        alive: !joinedMidMatch,
+        hp: joinedMidMatch ? 0 : TANK_HP,
+        x: 0,
+        y: 0,
+        angle: 0,
+        spacePrev: false,
+        hasMissile: false,
+        msgTimestamps: [],
+      });
+
+      if (scores[playerId] === undefined) {
+        scores[playerId] = 0;
+      }
+
+      console.log(`${name} (P${playerId}) connected (${color}, colorIdx ${colorIndex})${joinedMidMatch ? ' [spectating]' : ''}. Total: ${players.size}`);
+
+      // Send init
+      ws.send(JSON.stringify({
+        type: 'init',
+        playerId,
+        colors: getColorsMap(),
+        names: Object.fromEntries(Array.from(players.entries()).map(([id, p]) => [id, p.name])),
+      }));
+
+      // If joining mid-match, send map
+      if (joinedMidMatch && currentMap) {
+        ws.send(JSON.stringify({ type: 'newRound', map: currentMap }));
+      }
+
+      // Notify all players
+      broadcastLobby();
+      return;
+    }
+
+    // Everything below requires a joined player
+    if (!joined) return;
+    const player = players.get(playerId);
+    if (!player) return;
+
+    // Rate limiting
+    const now = Date.now();
+    player.msgTimestamps.push(now);
+    player.msgTimestamps = player.msgTimestamps.filter(t => now - t < 1000);
+    if (player.msgTimestamps.length > MSG_RATE_LIMIT) {
+      return;
+    }
+
+    // --- Ready toggle ---
+    if (msg.type === 'ready' && gameState === 'lobby') {
+      player.ready = !player.ready;
+      console.log(`${player.name} (P${playerId}) is ${player.ready ? 'ready' : 'not ready'}.`);
+      broadcastLobby();
+      checkReadyState();
+      return;
+    }
 
     if (msg.type === 'input' && msg.keys) {
       player.input = {
@@ -1068,19 +1593,18 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    if (!joined) return; // never fully joined, nothing to clean up
     console.log(`Player ${playerId} disconnected. Total: ${players.size - 1}`);
+
+    // Clean up disconnected player's score
+    delete scores[playerId];
 
     if (gameState === 'lobby') {
       players.delete(playerId);
-      // Broadcast updated player list / colors
-      const colorsMsg = JSON.stringify({ type: 'playerJoined', colors: getColorsMap() });
-      for (const [id, p] of players) {
-        if (p.ws.readyState === 1) {
-          p.ws.send(colorsMsg);
-        }
-      }
+      broadcastLobby();
+      checkReadyState();
     } else if (gameState === 'playing') {
-      // Mark as dead, don't remove (bullets stay, score persists)
+      // Mark as dead, don't remove (bullets stay)
       const player = players.get(playerId);
       if (player) {
         player.alive = false;
@@ -1110,14 +1634,19 @@ wss.on('connection', (ws) => {
       players.delete(playerId);
       rematchVotes.delete(playerId);
 
-      if (players.size === 0) {
-        // All players disconnected, reset
+      if (players.size < 2) {
+        // Not enough players — cancel countdown and return to lobby
         if (roundEndTimer) {
           clearTimeout(roundEndTimer);
           roundEndTimer = null;
         }
         gameState = 'lobby';
-        console.log('All players disconnected. Returning to lobby.');
+        if (players.size === 0) {
+          console.log('All players disconnected. Returning to lobby.');
+        } else {
+          console.log('Not enough players. Returning to lobby.');
+          broadcastLobby();
+        }
         return;
       }
 
@@ -1133,12 +1662,7 @@ wss.on('connection', (ws) => {
           clearTimeout(roundEndTimer);
           roundEndTimer = null;
         }
-        if (players.size >= 2) {
-          startNewRound();
-        } else {
-          gameState = 'lobby';
-          console.log('Not enough players for new round. Returning to lobby.');
-        }
+        startNewRound();
       }
     }
   });
@@ -1151,14 +1675,26 @@ function startGame() {
     return;
   }
 
-  // Cancel any pending round end timer
+  // Cancel any pending timers
   if (roundEndTimer) {
     clearTimeout(roundEndTimer);
     roundEndTimer = null;
   }
+  if (readyCountdownTimer) {
+    clearTimeout(readyCountdownTimer);
+    readyCountdownTimer = null;
+  }
+
+  // Reset ready states
+  for (const [id, player] of players) {
+    player.ready = false;
+  }
 
   gameState = 'playing';
   bullets = [];
+  powerUps = [];
+  missiles = [];
+  powerUpSpawnTimer = POWERUP_SPAWN_INTERVAL;
   currentMap = generateMap(players.size);
   const spawns = spawnPlayers(currentMap, players);
   debugPrintMap(currentMap, spawns);
@@ -1168,12 +1704,13 @@ function startGame() {
     player.hp = TANK_HP;
     player.alive = true;
     player.spacePrev = false;
+    player.hasMissile = false;
   }
 
   // Build spawns array for broadcast
   const spawnsArr = [];
   for (const [id, player] of players) {
-    spawnsArr.push({ id, x: player.x, y: player.y, angle: player.angle, color: player.color });
+    spawnsArr.push({ id, name: player.name, x: player.x, y: player.y, angle: player.angle, color: player.color });
   }
 
   // Send newRound to all clients
@@ -1188,6 +1725,7 @@ function startGame() {
     }
   }
 
+  lastTickTime = 0;
   tickInterval = setInterval(tick, 1000 / TICK_RATE);
   console.log(`Game started with ${players.size} player(s).`);
 }
@@ -1203,12 +1741,21 @@ function stopGame() {
     roundEndTimer = null;
   }
   bullets = [];
+  powerUps = [];
+  missiles = [];
   currentMap = null;
   rematchVotes = new Set();
+  for (const [id, player] of players) {
+    player.ready = false;
+  }
   console.log('Round ended. Returning to lobby.');
+  broadcastLobby();
 }
 
 function fullRestart() {
+  // Reload config from disk
+  reloadConfig();
+
   // Full restart: clear all state, disconnect all clients, return to lobby
   if (tickInterval) {
     clearInterval(tickInterval);
@@ -1218,20 +1765,27 @@ function fullRestart() {
     clearTimeout(roundEndTimer);
     roundEndTimer = null;
   }
+  if (readyCountdownTimer) {
+    clearTimeout(readyCountdownTimer);
+    readyCountdownTimer = null;
+  }
   gameState = 'lobby';
   bullets = [];
+  powerUps = [];
+  missiles = [];
   currentMap = null;
   scores = {};
   rematchVotes = new Set();
 
-  // Disconnect all WebSocket clients
+  // Notify and disconnect all WebSocket clients
+  const killMsg = JSON.stringify({ type: 'serverKill', reason: 'Server restarted.' });
   for (const [id, player] of players) {
     if (player.ws.readyState === 1) {
+      player.ws.send(killMsg);
       player.ws.close();
     }
   }
   players = new Map();
-  nextPlayerId = 1;
   console.log('Server restarted.');
 }
 
@@ -1243,8 +1797,7 @@ if (process.stdin.isTTY) {
   process.stdin.on('data', (key) => {
     // Ctrl+C to exit
     if (key === '\u0003') {
-      console.log('Shutting down...');
-      process.exit();
+      gracefulShutdown();
     }
     if (key.toLowerCase() === 's') {
       if (gameState === 'lobby' || gameState === 'roundEnd') {
@@ -1261,8 +1814,24 @@ if (process.stdin.isTTY) {
   });
 }
 
+// --- Graceful Shutdown ---
+function gracefulShutdown() {
+  console.log('Shutting down...');
+  const killMsg = JSON.stringify({ type: 'serverKill', reason: 'Server shut down.' });
+  for (const [id, player] of players) {
+    if (player.ws.readyState === 1) {
+      player.ws.send(killMsg);
+      player.ws.close();
+    }
+  }
+  process.exit();
+}
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
+
 // --- Start Server ---
 server.listen(PORT, () => {
   console.log(`AZ Tank Game server running on http://localhost:${PORT}`);
-  console.log('Press S to start game, R to restart, Ctrl+C to quit.');
+  console.log('Press S to force-start, R to restart, Ctrl+C to quit.');
 });
