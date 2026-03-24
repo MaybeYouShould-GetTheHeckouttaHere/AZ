@@ -797,7 +797,18 @@ function tick() {
   for (const [id, player] of players) {
     if (!player.alive) continue;
     if (player.pilotingMissileId !== null) {
-      player.spacePrev = player.input.space;
+      const keys = player.input;
+      if (keys.space && !player.spacePrev) {
+        // Self-destruct the missile and regain tank control
+        const wmIdx = wirelessMissiles.findIndex(wm => wm.id === player.pilotingMissileId);
+        if (wmIdx !== -1) {
+          const wm = wirelessMissiles[wmIdx];
+          frameDeaths.push({ x: wm.x, y: wm.y, color: player.color });
+          wirelessMissiles.splice(wmIdx, 1);
+        }
+        player.pilotingMissileId = null;
+      }
+      player.spacePrev = keys.space;
       continue; // Input is consumed by wireless missile tick
     }
     const keys = player.input;
@@ -1643,11 +1654,22 @@ function checkReadyState() {
 }
 
 // --- HTTP Server ---
+const MIME = { '.html': 'text/html', '.js': 'text/javascript' };
 const server = http.createServer((req, res) => {
-  if (req.method === 'GET' && req.url === '/') {
-    const html = fs.readFileSync(__dirname + '/index.html', 'utf8');
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(html);
+  const url = req.url === '/' ? '/index.html' : req.url;
+  const ext = path.extname(url);
+  if (req.method === 'GET' && MIME[ext]) {
+    const filePath = path.join(__dirname, url);
+    // Only allow files within the project directory
+    if (!filePath.startsWith(__dirname)) { res.writeHead(403); res.end(); return; }
+    try {
+      const content = fs.readFileSync(filePath);
+      res.writeHead(200, { 'Content-Type': MIME[ext] });
+      res.end(content);
+    } catch {
+      res.writeHead(404);
+      res.end('Not found');
+    }
   } else {
     res.writeHead(404);
     res.end('Not found');

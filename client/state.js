@@ -1,0 +1,17 @@
+export const state = {
+  ws: null, myId: null, myName: '',
+  colors: {}, names: {},
+  gamePhase: 'connect',
+  map: null, cellSize: 0,
+  lobbyPlayers: [], readyCountdownEnd: null,
+  players: [], bullets: [],
+  gamePowerUps: [], gameMissiles: [], gameWirelessMissiles: [],
+  gameLandmines: [], gameIceTraps: [],
+  winnerId: null, scores: {}, rematchVotes: [],
+  countdownEnd: 0,
+  particles: [],
+  readyBtn: { x: 0, y: 0, w: 0, h: 0 },
+  rematchBtn: { x: 0, y: 0, w: 0, h: 0 },
+  shakeTimeLeft: 0, shakeIntensity: 0,
+  lastSentKeys: null,
+};
