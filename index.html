@@ -961,6 +961,31 @@
       ctx.restore();
     }
 
+    // --- Drawing: Wireless Missile BFS Paths ---
+    function drawWmPaths() {
+      const myWm = gameWirelessMissiles.find(wm => wm.ownerId === myId);
+      if (!myWm || !myWm.paths || myWm.paths.length === 0) return;
+      ctx.save();
+      ctx.lineWidth = cellSize * 0.1;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.globalAlpha = 0.5;
+      for (const path of myWm.paths) {
+        if (!path.cells || path.cells.length < 2) continue;
+        ctx.strokeStyle = path.color;
+        ctx.beginPath();
+        const [c0, r0] = path.cells[0];
+        ctx.moveTo((c0 + 0.5) * cellSize, (r0 + 0.5) * cellSize);
+        for (let i = 1; i < path.cells.length; i++) {
+          const [c, r] = path.cells[i];
+          ctx.lineTo((c + 0.5) * cellSize, (r + 0.5) * cellSize);
+        }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+
     // --- Player Indicator Arrow ---
     function drawPlayerIndicator(me) {
       if (!me || !me.alive) return;
@@ -1388,6 +1413,7 @@
         gamePowerUps.forEach(pu => drawPowerUp(pu));
         gameLandmines.forEach(lm => drawLandmine(lm));
         gameIceTraps.forEach(it => drawIceTrap(it));
+        drawWmPaths();
         updateAndDrawParticles(dt);
         const me = players.find(p => p.id === myId);
         drawPlayerIndicator(me);

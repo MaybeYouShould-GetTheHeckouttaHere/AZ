@@ -89,6 +89,7 @@ function broadcastState() {
       id: wm.id, x: wm.x, y: wm.y, angle: wm.angle,
       ownerId: wm.pilotId,
       color: players.get(wm.pilotId)?.color || '#888888',
+      paths: wm.paths || [],
     }));
   }
   const visibleLandmines = landmines.filter(lm => lm.armTimer > 0 || lm.fadeTimer > 0);

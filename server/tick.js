@@ -3,7 +3,7 @@
 const { C, cfg: getCfg } = require('./config');
 const state = require('./state');
 const { resolveTankCollision, findFirstWallCollision, raycastBulletSpawn } = require('./physics');
-const { bfsNextWaypoint, selectMissileTarget } = require('./pathfinding');
+const { bfsNextWaypoint, selectMissileTarget, bfsFullPath } = require('./pathfinding');
 const { spawnPowerUp } = require('./powerups');
 const { broadcastState } = require('./broadcast');
 
@@ -22,6 +22,7 @@ function createTick(endRound) {
     // --- Tank Movement ---
     for (const [id, player] of players) {
       if (!player.alive) continue;
+      if (player.fireCooldown > 0) player.fireCooldown -= DT;
       if (player.pilotingMissileId !== null) {
         const keys = player.input;
         if (keys.space && !player.spacePrev) {
@@ -128,14 +129,16 @@ function createTick(endRound) {
             y: player.y + sinA * spawnDist,
             angle: player.angle,
             lifetime: C.WIRELESS_MISSILE_LIFETIME,
+            pathfindTick: C.PATHFIND_INTERVAL, // compute immediately on first tick
+            paths: [],
           };
           wirelessMissiles.push(wm);
           player.pilotingMissileId = wm.id;
           player.powerUp = null;
         } else {
-          // Check if player has no active bullet
+          // Check if player has no active bullet and cooldown has expired
           const hasActiveBullet = bullets.some(b => b.ownerId === id);
-          if (!hasActiveBullet) {
+          if (!hasActiveBullet && player.fireCooldown <= 0) {
             const cosA = Math.cos(player.angle);
             const sinA = Math.sin(player.angle);
             let bdx = cosA * C.BULLET_SPEED;
@@ -169,6 +172,7 @@ function createTick(endRound) {
               dy: bdy,
               bouncesLeft: hit ? C.MAX_BOUNCES - 1 : C.MAX_BOUNCES,
             });
+            player.fireCooldown = C.FIRE_COOLDOWN;
 
             if (hit) {
               state.frameHits.push({ x: bx, y: by });
@@ -577,6 +581,26 @@ function createTick(endRound) {
       const wmResolved = resolveTankCollision(wm.x, wm.y, C.MISSILE_RADIUS, map);
       wm.x = wmResolved.x;
       wm.y = wmResolved.y;
+
+      // Pathfinding — recompute paths every PATHFIND_INTERVAL ticks
+      wm.pathfindTick++;
+      if (wm.pathfindTick >= C.PATHFIND_INTERVAL) {
+        wm.pathfindTick = 0;
+        // Find nearest N living enemies (not the pilot) by BFS distance
+        const enemies = [];
+        for (const [tid, target] of players) {
+          if (tid === wm.pilotId || !target.alive) continue;
+          const d = Math.hypot(wm.x - target.x, wm.y - target.y);
+          enemies.push({ id: tid, color: target.color, x: target.x, y: target.y, d });
+        }
+        enemies.sort((a, b) => a.d - b.d);
+        wm.paths = [];
+        for (let ei = 0; ei < Math.min(C.PATHFIND_ENEMY_COUNT, enemies.length); ei++) {
+          const e = enemies[ei];
+          const cells = bfsFullPath(map, wm.x, wm.y, e.x, e.y);
+          if (cells) wm.paths.push({ color: e.color, cells });
+        }
+      }
 
       // Tank collision — skip pilot
       let wmDestroyed = false;

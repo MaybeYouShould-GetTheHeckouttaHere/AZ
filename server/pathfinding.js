@@ -178,6 +178,67 @@ function bfsNextWaypoint(map, fromX, fromY, toX, toY) {
   return { x: cur[1] + 0.5, y: cur[0] + 0.5 };
 }
 
+// BFS full path from world position to world position.
+// Returns array of [col, row] cell indices (including start and end), or null if unreachable.
+function bfsFullPath(map, fromX, fromY, toX, toY) {
+  const { rows, cols, hWalls, vWalls } = map;
+  const sr = Math.max(0, Math.min(rows - 1, Math.floor(fromY)));
+  const sc = Math.max(0, Math.min(cols - 1, Math.floor(fromX)));
+  const er = Math.max(0, Math.min(rows - 1, Math.floor(toY)));
+  const ec = Math.max(0, Math.min(cols - 1, Math.floor(toX)));
+
+  if (sr === er && sc === ec) return [[sc, sr]];
+
+  const visited = [];
+  const parent = [];
+  for (let r = 0; r < rows; r++) {
+    visited[r] = new Array(cols).fill(false);
+    parent[r] = new Array(cols).fill(null);
+  }
+
+  const queue = [[sr, sc]];
+  visited[sr][sc] = true;
+  let found = false;
+
+  while (queue.length > 0) {
+    const [cr, cc] = queue.shift();
+    if (cr === er && cc === ec) { found = true; break; }
+
+    if (cr > 0 && !visited[cr - 1][cc] && !hWalls[cr][cc]) {
+      visited[cr - 1][cc] = true;
+      parent[cr - 1][cc] = [cr, cc];
+      queue.push([cr - 1, cc]);
+    }
+    if (cr < rows - 1 && !visited[cr + 1][cc] && !hWalls[cr + 1][cc]) {
+      visited[cr + 1][cc] = true;
+      parent[cr + 1][cc] = [cr, cc];
+      queue.push([cr + 1, cc]);
+    }
+    if (cc > 0 && !visited[cr][cc - 1] && !vWalls[cr][cc]) {
+      visited[cr][cc - 1] = true;
+      parent[cr][cc - 1] = [cr, cc];
+      queue.push([cr, cc - 1]);
+    }
+    if (cc < cols - 1 && !visited[cr][cc + 1] && !vWalls[cr][cc + 1]) {
+      visited[cr][cc + 1] = true;
+      parent[cr][cc + 1] = [cr, cc];
+      queue.push([cr, cc + 1]);
+    }
+  }
+
+  if (!found) return null;
+
+  // Reconstruct as [col, row] pairs
+  const path = [];
+  let cur = [er, ec];
+  while (cur !== null) {
+    path.push([cur[1], cur[0]]);
+    cur = parent[cur[0]][cur[1]];
+  }
+  path.reverse();
+  return path;
+}
+
 // Missile target selection
 function selectMissileTarget(missile, map) {
   const { players } = state;
@@ -197,4 +258,4 @@ function selectMissileTarget(missile, map) {
   return bestTarget;
 }
 
-module.exports = { hasLineOfSight, bfsDistance, bfsNextWaypoint, selectMissileTarget };
+module.exports = { hasLineOfSight, bfsDistance, bfsNextWaypoint, selectMissileTarget, bfsFullPath };

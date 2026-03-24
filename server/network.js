@@ -103,6 +103,7 @@ wss.on('connection', (ws) => {
         y: 0,
         angle: 0,
         spacePrev: false,
+        fireCooldown: 0,
         powerUp: null,
         pilotingMissileId: null,
         vx: 0, vy: 0, angularVel: 0,

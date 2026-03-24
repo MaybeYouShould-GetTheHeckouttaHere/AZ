@@ -21,6 +21,7 @@ const C = {
   BULLET_SPEED: cfg.bulletSpeed,
   MAX_BOUNCES: cfg.maxBounces,
   TANK_HP: cfg.tankHP,
+  FIRE_COOLDOWN: cfg.fireCooldown ?? 1,
   MISSILE_SPEED: cfg.missileSpeed || 3.2,
   MISSILE_ARM_TIME: cfg.missileArmTime || 0.6,
   MISSILE_ARM_SPEED: cfg.missileArmSpeed || 5.4,
@@ -44,6 +45,8 @@ const C = {
   ICE_TRACTION: cfg.iceTraction || 0.05,
   ICE_TURN_TRACTION: cfg.iceTurnTraction || 1.5,
   ICE_RADIUS: cfg.iceRadius || 0.2,
+  PATHFIND_INTERVAL: cfg.pathfindInterval ?? 5,
+  PATHFIND_ENEMY_COUNT: cfg.pathfindEnemyCount ?? 2,
 };
 
 function reloadConfig() {
@@ -59,6 +62,7 @@ function reloadConfig() {
     C.BULLET_SPEED = cfg.bulletSpeed;
     C.MAX_BOUNCES = cfg.maxBounces;
     C.TANK_HP = cfg.tankHP;
+    C.FIRE_COOLDOWN = cfg.fireCooldown ?? 1;
     C.MAX_PLAYERS = cfg.maxPlayers || 6;
     C.READY_THRESHOLD = cfg.readyThreshold || 0.67;
     C.READY_COUNTDOWN_MS = cfg.readyCountdownMs || 10000;
@@ -85,6 +89,8 @@ function reloadConfig() {
     C.ICE_TRACTION = cfg.iceTraction || 0.05;
     C.ICE_TURN_TRACTION = cfg.iceTurnTraction || 1.5;
     C.ICE_RADIUS = cfg.iceRadius || 0.2;
+    C.PATHFIND_INTERVAL = cfg.pathfindInterval ?? 5;
+    C.PATHFIND_ENEMY_COUNT = cfg.pathfindEnemyCount ?? 2;
     console.log('Config reloaded.');
   } catch (e) {
     console.error('Failed to reload config:', e.message);

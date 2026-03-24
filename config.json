@@ -10,6 +10,7 @@
   "bulletSpeed": 4.05,
   "maxBounces": 6,
   "tankHP": 3,
+  "fireCooldown": 1,
   "barrelLength": 0.35,
 
   "gridBaseSize": 6,
@@ -27,6 +28,8 @@
   "missileRadius": 0.15,
   "missileLifetime": 12,
   "missileRetargetInterval": 1,
+  "pathfindInterval": 5,
+  "pathfindEnemyCount": 2,
   "powerUpSpawnInterval": 2,
   "powerUpRadius": 0.3,
   "maxPowerUps": 6,
