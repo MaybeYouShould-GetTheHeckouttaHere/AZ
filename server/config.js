@@ -21,6 +21,7 @@ const C = {
   BULLET_SPEED: cfg.bulletSpeed,
   MAX_BOUNCES: cfg.maxBounces,
   TANK_HP: cfg.tankHP,
+  FIRE_COOLDOWN: cfg.fireCooldown ?? 1,
   MISSILE_SPEED: cfg.missileSpeed || 3.2,
   MISSILE_ARM_TIME: cfg.missileArmTime || 0.6,
   MISSILE_ARM_SPEED: cfg.missileArmSpeed || 5.4,
@@ -59,6 +60,7 @@ function reloadConfig() {
     C.BULLET_SPEED = cfg.bulletSpeed;
     C.MAX_BOUNCES = cfg.maxBounces;
     C.TANK_HP = cfg.tankHP;
+    C.FIRE_COOLDOWN = cfg.fireCooldown ?? 1;
     C.MAX_PLAYERS = cfg.maxPlayers || 6;
     C.READY_THRESHOLD = cfg.readyThreshold || 0.67;
     C.READY_COUNTDOWN_MS = cfg.readyCountdownMs || 10000;

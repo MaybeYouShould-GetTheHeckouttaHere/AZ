@@ -22,6 +22,7 @@ function createTick(endRound) {
     // --- Tank Movement ---
     for (const [id, player] of players) {
       if (!player.alive) continue;
+      if (player.fireCooldown > 0) player.fireCooldown -= DT;
       if (player.pilotingMissileId !== null) {
         const keys = player.input;
         if (keys.space && !player.spacePrev) {
@@ -133,9 +134,9 @@ function createTick(endRound) {
           player.pilotingMissileId = wm.id;
           player.powerUp = null;
         } else {
-          // Check if player has no active bullet
+          // Check if player has no active bullet and cooldown has expired
           const hasActiveBullet = bullets.some(b => b.ownerId === id);
-          if (!hasActiveBullet) {
+          if (!hasActiveBullet && player.fireCooldown <= 0) {
             const cosA = Math.cos(player.angle);
             const sinA = Math.sin(player.angle);
             let bdx = cosA * C.BULLET_SPEED;
@@ -169,6 +170,7 @@ function createTick(endRound) {
               dy: bdy,
               bouncesLeft: hit ? C.MAX_BOUNCES - 1 : C.MAX_BOUNCES,
             });
+            player.fireCooldown = C.FIRE_COOLDOWN;
 
             if (hit) {
               state.frameHits.push({ x: bx, y: by });

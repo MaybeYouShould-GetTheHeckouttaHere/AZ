@@ -75,6 +75,7 @@ function startNewRound() {
     player.hp = C.TANK_HP;
     player.alive = true;
     player.spacePrev = false;
+    player.fireCooldown = 0;
     player.powerUp = null;
     player.pilotingMissileId = null;
     player.vx = 0; player.vy = 0; player.angularVel = 0;
@@ -200,6 +201,7 @@ function startGame() {
     player.hp = C.TANK_HP;
     player.alive = true;
     player.spacePrev = false;
+    player.fireCooldown = 0;
     player.powerUp = null;
     player.pilotingMissileId = null;
     player.vx = 0; player.vy = 0; player.angularVel = 0;
