@@ -597,7 +597,7 @@ function createTick(endRound) {
         wm.paths = [];
         for (let ei = 0; ei < Math.min(C.PATHFIND_ENEMY_COUNT, enemies.length); ei++) {
           const e = enemies[ei];
-          const cells = bfsFullPath(map, wm.x, wm.y, e.x, e.y);
+          const cells = bfsFullPath(map, wm.x, wm.y, wm.angle, e.x, e.y);
           if (cells) wm.paths.push({ color: e.color, cells });
         }
       }

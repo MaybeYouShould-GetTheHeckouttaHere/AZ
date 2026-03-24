@@ -178,9 +178,12 @@ function bfsNextWaypoint(map, fromX, fromY, toX, toY) {
   return { x: cur[1] + 0.5, y: cur[0] + 0.5 };
 }
 
-// BFS full path from world position to world position.
-// Returns array of [col, row] cell indices (including start and end), or null if unreachable.
-function bfsFullPath(map, fromX, fromY, toX, toY) {
+// Dijkstra path from world position to world position, penalising 180° turns.
+// State: (row, col, direction). 90° turns cost 1 (same as straight). 180° turns
+// cost 1 + U_TURN_PENALTY, so the algorithm only reverses when the detour saves
+// significantly more cells than the penalty.
+// Returns array of [col, row] cell indices (start→end), or null if unreachable.
+function bfsFullPath(map, fromX, fromY, fromAngle, toX, toY) {
   const { rows, cols, hWalls, vWalls } = map;
   const sr = Math.max(0, Math.min(rows - 1, Math.floor(fromY)));
   const sc = Math.max(0, Math.min(cols - 1, Math.floor(fromX)));
@@ -189,54 +192,75 @@ function bfsFullPath(map, fromX, fromY, toX, toY) {
 
   if (sr === er && sc === ec) return [[sc, sr]];
 
-  const visited = [];
-  const parent = [];
-  for (let r = 0; r < rows; r++) {
-    visited[r] = new Array(cols).fill(false);
-    parent[r] = new Array(cols).fill(null);
+  const U_TURN_PENALTY = 15;
+
+  // Directions: 0=right(+col), 1=down(+row), 2=left(-col), 3=up(-row)
+  const DR = [0, 1, 0, -1];
+  const DC = [1, 0, -1, 0];
+
+  // Quantize missile angle to nearest grid direction
+  const adx = Math.cos(fromAngle);
+  const ady = Math.sin(fromAngle);
+  const startDir = Math.abs(adx) >= Math.abs(ady)
+    ? (adx >= 0 ? 0 : 2)
+    : (ady >= 0 ? 1 : 3);
+
+  // dist[r][c][d] = min cost to reach (r,c) arriving via direction d
+  const dist = Array.from({ length: rows }, () =>
+    Array.from({ length: cols }, () => [Infinity, Infinity, Infinity, Infinity])
+  );
+  const par = Array.from({ length: rows }, () =>
+    Array.from({ length: cols }, () => [null, null, null, null])
+  );
+
+  dist[sr][sc][startDir] = 0;
+  // [cost, row, col, dir]
+  const pq = [[0, sr, sc, startDir]];
+
+  while (pq.length > 0) {
+    // Extract minimum-cost entry
+    let mi = 0;
+    for (let i = 1; i < pq.length; i++) { if (pq[i][0] < pq[mi][0]) mi = i; }
+    const [cost, cr, cc, cd] = pq[mi];
+    pq.splice(mi, 1);
+
+    if (cost > dist[cr][cc][cd]) continue; // stale entry
+
+    if (cr === er && cc === ec) {
+      // Reconstruct [col, row] path
+      const path = [];
+      let cur = [cr, cc, cd];
+      while (cur !== null) {
+        path.push([cur[1], cur[0]]);
+        cur = par[cur[0]][cur[1]][cur[2]];
+      }
+      path.reverse();
+      return path;
+    }
+
+    for (let nd = 0; nd < 4; nd++) {
+      const nr = cr + DR[nd];
+      const nc = cc + DC[nd];
+      if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+
+      // Wall check (same convention as bfsDistance)
+      if (nd === 3 && hWalls[cr][cc]) continue;      // up
+      if (nd === 1 && hWalls[cr + 1][cc]) continue;  // down
+      if (nd === 2 && vWalls[cr][cc]) continue;       // left
+      if (nd === 0 && vWalls[cr][cc + 1]) continue;  // right
+
+      const turnDiff = (nd - cd + 4) % 4;
+      const newCost = cost + 1 + (turnDiff === 2 ? U_TURN_PENALTY : 0);
+
+      if (newCost < dist[nr][nc][nd]) {
+        dist[nr][nc][nd] = newCost;
+        par[nr][nc][nd] = [cr, cc, cd];
+        pq.push([newCost, nr, nc, nd]);
+      }
+    }
   }
 
-  const queue = [[sr, sc]];
-  visited[sr][sc] = true;
-  let found = false;
-
-  while (queue.length > 0) {
-    const [cr, cc] = queue.shift();
-    if (cr === er && cc === ec) { found = true; break; }
-
-    if (cr > 0 && !visited[cr - 1][cc] && !hWalls[cr][cc]) {
-      visited[cr - 1][cc] = true;
-      parent[cr - 1][cc] = [cr, cc];
-      queue.push([cr - 1, cc]);
-    }
-    if (cr < rows - 1 && !visited[cr + 1][cc] && !hWalls[cr + 1][cc]) {
-      visited[cr + 1][cc] = true;
-      parent[cr + 1][cc] = [cr, cc];
-      queue.push([cr + 1, cc]);
-    }
-    if (cc > 0 && !visited[cr][cc - 1] && !vWalls[cr][cc]) {
-      visited[cr][cc - 1] = true;
-      parent[cr][cc - 1] = [cr, cc];
-      queue.push([cr, cc - 1]);
-    }
-    if (cc < cols - 1 && !visited[cr][cc + 1] && !vWalls[cr][cc + 1]) {
-      visited[cr][cc + 1] = true;
-      parent[cr][cc + 1] = [cr, cc];
-      queue.push([cr, cc + 1]);
-    }
-  }
-
-  if (!found) return null;
-
-  // Reconstruct as [col, row] pairs
-  const path = [];
-  let cur = [er, ec];
-  while (cur !== null) {
-    path.push([cur[1], cur[0]]);
-    cur = parent[cur[0]][cur[1]];
-  }
-  path.reverse();
-  return path;
+  return null;
 }
 
 // Missile target selection
