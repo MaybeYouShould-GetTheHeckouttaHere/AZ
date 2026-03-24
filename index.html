@@ -103,6 +103,9 @@
     let bullets = [];
     let gamePowerUps = [];
     let gameMissiles = [];
+    let gameWirelessMissiles = [];
+    let gameLandmines = [];
+    let gameIceTraps = [];
     let winnerId = null;
     let scores = {};
     let rematchVotes = [];
@@ -142,6 +145,9 @@
       bullets = [];
       gamePowerUps = [];
       gameMissiles = [];
+      gameWirelessMissiles = [];
+      gameLandmines = [];
+      gameIceTraps = [];
       map = null;
       scores = {};
       rematchVotes = [];
@@ -267,6 +273,8 @@
               bullets = [];
               gamePowerUps = [];
               gameMissiles = [];
+              gameLandmines = [];
+              gameIceTraps = [];
               particles = [];
             }
             break;
@@ -279,6 +287,8 @@
             }
             bullets = msg.bullets;
             gamePowerUps = msg.powerUps || [];
+            gameLandmines = msg.landmines || [];
+            gameIceTraps = msg.iceTraps || [];
             // Spawn smoke trail particles for missiles
             if (msg.missiles) {
               for (const m of msg.missiles) {
@@ -287,6 +297,12 @@
               }
             }
             gameMissiles = msg.missiles || [];
+            if (msg.wirelessMissiles) {
+              for (const wm of msg.wirelessMissiles) {
+                spawnMissileSmoke(wm.x, wm.y, wm.angle, wm.color);
+              }
+            }
+            gameWirelessMissiles = msg.wirelessMissiles || [];
             if (msg.hits) {
               for (const hit of msg.hits) {
                 spawnParticles(hit.x, hit.y);
@@ -329,11 +345,17 @@
     let lastSentKeys = null;
 
     const keyMap = {
-      'KeyW': 'w', 'KeyA': 'a', 'KeyS': 's', 'KeyD': 'd', 'Space': 'space'
+      'KeyW': 'w', 'KeyA': 'a', 'KeyS': 's', 'KeyD': 'd', 'Space': 'space',
+      'ArrowUp': 'w', 'ArrowLeft': 'a', 'ArrowDown': 's', 'ArrowRight': 'd'
     };
 
     window.addEventListener('keydown', (e) => {
       if (gamePhase === 'connect') return;
+      if (gamePhase === 'lobby' && e.code === 'Space') {
+        e.preventDefault();
+        if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'ready' }));
+        return;
+      }
       const key = keyMap[e.code];
       if (key) {
         e.preventDefault();
@@ -385,6 +407,18 @@
           }
         }
       }
+    });
+
+    // --- Click to fire ---
+    canvas.addEventListener('mousedown', (e) => {
+      if (gamePhase !== 'playing' || e.button !== 0) return;
+      keys.space = true;
+      sendInput();
+    });
+    canvas.addEventListener('mouseup', (e) => {
+      if (e.button !== 0) return;
+      keys.space = false;
+      sendInput();
     });
 
     // --- Drawing helpers ---
@@ -470,21 +504,49 @@
       ctx.strokeStyle = darkenColor(color, 0.5);
       ctx.lineWidth = 1;
 
-      if (player.hasMissile) {
-        // Missile barrel: rectangular body + triangle warhead tip
+      if (player.powerUp === 'missile' || player.powerUp === 'wirelessMissile') {
+        // Missile / wireless missile barrel: rectangular body + triangle warhead tip
         ctx.fillRect(-barrelW / 2, -barrelL * 0.65, barrelW, barrelL * 0.65);
         ctx.strokeRect(-barrelW / 2, -barrelL * 0.65, barrelW, barrelL * 0.65);
-        // Triangle tip (warhead)
         const tipW = barrelW * 1.6;
-        ctx.fillStyle = '#e74c3c';
+        const tipColor = player.powerUp === 'wirelessMissile' ? '#111' : '#e74c3c';
+        const tipStroke = player.powerUp === 'wirelessMissile' ? '#000' : '#c0392b';
+        ctx.fillStyle = tipColor;
         ctx.beginPath();
         ctx.moveTo(0, -barrelL - barrelW * 0.3);
         ctx.lineTo(-tipW / 2, -barrelL * 0.65);
         ctx.lineTo(tipW / 2, -barrelL * 0.65);
         ctx.closePath();
         ctx.fill();
-        ctx.strokeStyle = '#c0392b';
+        ctx.strokeStyle = tipStroke;
         ctx.stroke();
+      } else if (player.powerUp === 'landmine') {
+        // Landmine barrel: short barrel + circle with button on top
+        ctx.fillRect(-barrelW / 2, -barrelL * 0.4, barrelW, barrelL * 0.4);
+        ctx.strokeRect(-barrelW / 2, -barrelL * 0.4, barrelW, barrelL * 0.4);
+        const mineR = barrelW * 0.9;
+        ctx.fillStyle = '#555';
+        ctx.beginPath();
+        ctx.arc(0, -barrelL * 0.4 - mineR, mineR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#333';
+        ctx.stroke();
+        // Button on top
+        ctx.fillStyle = '#cc3333';
+        ctx.beginPath();
+        ctx.arc(0, -barrelL * 0.4 - mineR - mineR * 0.3, mineR * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      } else if (player.powerUp === 'ice') {
+        // Ice barrel: short barrel + ice crystal
+        ctx.fillRect(-barrelW / 2, -barrelL * 0.4, barrelW, barrelL * 0.4);
+        ctx.strokeRect(-barrelW / 2, -barrelL * 0.4, barrelW, barrelL * 0.4);
+        const iceS = barrelW * 0.8;
+        const iceY = -barrelL * 0.4 - iceS * 1.2;
+        ctx.fillStyle = 'rgba(135, 206, 250, 0.8)';
+        ctx.strokeStyle = '#4a9bd9';
+        ctx.fillRect(-iceS, iceY - iceS, iceS * 2, iceS * 2);
+        ctx.strokeRect(-iceS, iceY - iceS, iceS * 2, iceS * 2);
       } else {
         // Normal barrel
         ctx.fillRect(-barrelW / 2, -barrelL, barrelW, barrelL);
@@ -652,30 +714,151 @@
       ctx.fillRect(-size / 2, -size / 2, size, size);
       ctx.strokeRect(-size / 2, -size / 2, size, size);
 
-      // Missile icon (small rocket shape)
+      // Icon per type
       const s = size * 0.35;
-      ctx.fillStyle = '#e74c3c';
-      ctx.strokeStyle = '#c0392b';
       ctx.lineWidth = 1;
 
+      if (pu.type === 'missile') {
+        ctx.fillStyle = '#e74c3c';
+        ctx.strokeStyle = '#c0392b';
+        ctx.beginPath();
+        ctx.moveTo(0, -s);
+        ctx.lineTo(s * 0.35, -s * 0.3);
+        ctx.lineTo(s * 0.35, s * 0.5);
+        ctx.lineTo(s * 0.6, s * 0.8);
+        ctx.lineTo(s * 0.35, s * 0.6);
+        ctx.lineTo(-s * 0.35, s * 0.6);
+        ctx.lineTo(-s * 0.6, s * 0.8);
+        ctx.lineTo(-s * 0.35, s * 0.5);
+        ctx.lineTo(-s * 0.35, -s * 0.3);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      } else if (pu.type === 'landmine') {
+        // Circle with spikes
+        ctx.fillStyle = '#555';
+        ctx.strokeStyle = '#333';
+        ctx.beginPath();
+        ctx.arc(0, 0, s * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        // Spikes
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1.5;
+        for (let a = 0; a < 6; a++) {
+          const ang = a * Math.PI / 3;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(ang) * s * 0.5, Math.sin(ang) * s * 0.5);
+          ctx.lineTo(Math.cos(ang) * s * 0.85, Math.sin(ang) * s * 0.85);
+          ctx.stroke();
+        }
+        // Red button
+        ctx.fillStyle = '#cc3333';
+        ctx.beginPath();
+        ctx.arc(0, 0, s * 0.25, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (pu.type === 'ice') {
+        // Ice cube
+        const cs = s * 0.7;
+        ctx.fillStyle = 'rgba(135, 206, 250, 0.8)';
+        ctx.strokeStyle = '#4a9bd9';
+        ctx.lineWidth = 1.5;
+        ctx.fillRect(-cs, -cs, cs * 2, cs * 2);
+        ctx.strokeRect(-cs, -cs, cs * 2, cs * 2);
+        // Shine line
+        ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-cs * 0.5, -cs * 0.7);
+        ctx.lineTo(-cs * 0.5, cs * 0.3);
+        ctx.stroke();
+      } else if (pu.type === 'wirelessMissile') {
+        // WiFi icon: dot + 3 arcs fanning upward
+        ctx.fillStyle = '#2255cc';
+        ctx.strokeStyle = '#2255cc';
+        ctx.lineCap = 'round';
+        ctx.lineWidth = 1.5;
+        const dotY = s * 0.65;
+        // Dot
+        ctx.beginPath();
+        ctx.arc(0, dotY, s * 0.14, 0, Math.PI * 2);
+        ctx.fill();
+        // Three arcs, each centered at dot, sweeping 135° upward
+        const arcStart = Math.PI * 1.175;
+        const arcEnd   = Math.PI * 1.825;
+        for (let ai = 0; ai < 3; ai++) {
+          const r = s * (0.28 + ai * 0.3);
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(0, dotY, r, arcStart, arcEnd);
+          ctx.stroke();
+        }
+      }
+
+      ctx.restore();
+    }
+
+    // --- Drawing: Landmine ---
+    function drawLandmine(lm) {
+      const px = lm.x * cellSize;
+      const py = lm.y * cellSize;
+      const r = cellSize * 0.15;
+
+      ctx.save();
+      ctx.globalAlpha = lm.alpha ?? 1;
+      ctx.translate(px, py);
+
+      // Outer circle
+      ctx.fillStyle = lm.armed ? '#6b3030' : '#555';
+      ctx.strokeStyle = lm.armed ? '#993333' : '#444';
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      // Nose cone (top)
-      ctx.moveTo(0, -s);
-      ctx.lineTo(s * 0.35, -s * 0.3);
-      ctx.lineTo(s * 0.35, s * 0.5);
-      // Fin right
-      ctx.lineTo(s * 0.6, s * 0.8);
-      ctx.lineTo(s * 0.35, s * 0.6);
-      // Bottom
-      ctx.lineTo(-s * 0.35, s * 0.6);
-      // Fin left
-      ctx.lineTo(-s * 0.6, s * 0.8);
-      ctx.lineTo(-s * 0.35, s * 0.5);
-      ctx.lineTo(-s * 0.35, -s * 0.3);
-      ctx.closePath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
 
+      // Spikes (only when armed)
+      if (lm.armed) {
+        ctx.strokeStyle = '#993333';
+        ctx.lineWidth = 1;
+        for (let a = 0; a < 8; a++) {
+          const ang = a * Math.PI / 4;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(ang) * r * 0.8, Math.sin(ang) * r * 0.8);
+          ctx.lineTo(Math.cos(ang) * r * 1.3, Math.sin(ang) * r * 1.3);
+          ctx.stroke();
+        }
+      }
+
+      // Button
+      ctx.fillStyle = lm.armed ? '#ff4444' : '#888';
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    // --- Drawing: Ice Trap ---
+    function drawIceTrap(it) {
+      const px = it.x * cellSize;
+      const py = it.y * cellSize;
+      const s = cellSize * 0.18;
+
+      ctx.save();
+      ctx.globalAlpha = (it.alpha ?? 1) * 0.85;
+      ctx.fillStyle = it.armed ? 'rgba(135, 206, 250, 0.6)' : 'rgba(200, 230, 255, 0.5)';
+      ctx.strokeStyle = it.armed ? '#4a9bd9' : '#aad4f0';
+      ctx.lineWidth = 1.5;
+      ctx.fillRect(px - s, py - s, s * 2, s * 2);
+      ctx.strokeRect(px - s, py - s, s * 2, s * 2);
+      // Shine
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px - s * 0.4, py - s * 0.7);
+      ctx.lineTo(px - s * 0.4, py + s * 0.3);
+      ctx.stroke();
       ctx.restore();
     }
 
@@ -709,6 +892,60 @@
       ctx.lineTo(-size * 0.9, size * 1.3);
       ctx.lineTo(-size * 0.5, size * 0.8);
       ctx.lineTo(-size * 0.5, -size * 0.3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Engine glow
+      ctx.fillStyle = '#ff6600';
+      ctx.globalAlpha = 0.6 + Math.random() * 0.4;
+      ctx.beginPath();
+      ctx.arc(0, size * 1.1, size * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      ctx.restore();
+    }
+
+    // --- Drawing: Wireless Missile ---
+    function drawWirelessMissile(wm) {
+      const px = wm.x * cellSize;
+      const py = wm.y * cellSize;
+      const color = wm.color || '#888';
+      const size = cellSize * 0.12;
+
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(wm.angle + Math.PI / 2);
+
+      // Body — uses owner color
+      ctx.fillStyle = color;
+      ctx.strokeStyle = darkenColor(color, 0.5);
+      ctx.lineWidth = 1.5;
+
+      ctx.beginPath();
+      ctx.moveTo(0, -size * 1.5);
+      ctx.lineTo(size * 0.5, -size * 0.3);
+      ctx.lineTo(size * 0.5, size * 0.8);
+      ctx.lineTo(size * 0.9, size * 1.3);
+      ctx.lineTo(size * 0.5, size);
+      ctx.lineTo(-size * 0.5, size);
+      ctx.lineTo(-size * 0.9, size * 1.3);
+      ctx.lineTo(-size * 0.5, size * 0.8);
+      ctx.lineTo(-size * 0.5, -size * 0.3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Black tip (warhead)
+      ctx.fillStyle = '#111';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1;
+      const tipW = size * 0.5 * 1.6;
+      ctx.beginPath();
+      ctx.moveTo(0, -size * 1.5);
+      ctx.lineTo(-tipW / 2, -size * 0.3);
+      ctx.lineTo(tipW / 2, -size * 0.3);
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
@@ -1149,21 +1386,27 @@
         ctx.translate(shake.x, shake.y);
         drawMap();
         gamePowerUps.forEach(pu => drawPowerUp(pu));
+        gameLandmines.forEach(lm => drawLandmine(lm));
+        gameIceTraps.forEach(it => drawIceTrap(it));
         updateAndDrawParticles(dt);
         const me = players.find(p => p.id === myId);
         drawPlayerIndicator(me);
         players.forEach(p => { if (p.alive) drawTank(p); });
         bullets.forEach(b => drawBullet(b));
         gameMissiles.forEach(m => drawMissile(m));
+        gameWirelessMissiles.forEach(wm => drawWirelessMissile(wm));
         ctx.restore();
         drawHUD(); // HUD doesn't shake
       } else if (gamePhase === 'roundEnd') {
         drawMap();
         gamePowerUps.forEach(pu => drawPowerUp(pu));
+        gameLandmines.forEach(lm => drawLandmine(lm));
+        gameIceTraps.forEach(it => drawIceTrap(it));
         updateAndDrawParticles(dt);
         players.forEach(p => drawTank(p));
         bullets.forEach(b => drawBullet(b));
         gameMissiles.forEach(m => drawMissile(m));
+        gameWirelessMissiles.forEach(wm => drawWirelessMissile(wm));
         drawHUD();
         drawScoreOverlay();
       }

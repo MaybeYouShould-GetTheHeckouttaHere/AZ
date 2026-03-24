@@ -24,13 +24,28 @@ function reloadConfig() {
     READY_THRESHOLD = cfg.readyThreshold || 0.67;
     READY_COUNTDOWN_MS = cfg.readyCountdownMs || 10000;
     MISSILE_SPEED = cfg.missileSpeed || 3.2;
+    MISSILE_ARM_TIME = cfg.missileArmTime || 0.6;
+    MISSILE_ARM_SPEED = cfg.missileArmSpeed || 5.4;
+    MISSILE_MIN_TURN_RADIUS = cfg.missileMinTurnRadius || 0.8;
     MISSILE_ACCEL = cfg.missileAccel || 8;
+    WIRELESS_MISSILE_SPEED = cfg.wirelessMissileSpeed || 4.5;
+    WIRELESS_MISSILE_TURN_DIAMETER = cfg.wirelessMissileTurnDiameter || 0.75;
+    WIRELESS_MISSILE_LIFETIME = cfg.wirelessMissileLifetime || 12;
     MISSILE_RADIUS = cfg.missileRadius || 0.15;
     MISSILE_LIFETIME = cfg.missileLifetime || 12;
     MISSILE_RETARGET_INTERVAL = cfg.missileRetargetInterval || 1;
     POWERUP_SPAWN_INTERVAL = cfg.powerUpSpawnInterval || 10;
     POWERUP_RADIUS = cfg.powerUpRadius || 0.3;
     MAX_POWERUPS = cfg.maxPowerUps || 3;
+    LANDMINE_ARM_TIME = cfg.landmineArmTime || 1;
+    LANDMINE_FADE_TIME = cfg.landmineFadeTime || 2;
+    LANDMINE_RADIUS = cfg.landmineRadius || 0.18;
+    ICE_ARM_TIME = cfg.iceArmTime || cfg.iceVisibleTime || 1;
+    ICE_FADE_TIME = cfg.iceFadeTime || 2;
+    ICE_EFFECT_DURATION = cfg.iceEffectDuration || 3;
+    ICE_TRACTION = cfg.iceTraction || 0.05;
+    ICE_TURN_TRACTION = cfg.iceTurnTraction || 1.5;
+    ICE_RADIUS = cfg.iceRadius || 0.2;
     console.log('Config reloaded.');
   } catch (e) {
     console.error('Failed to reload config:', e.message);
@@ -55,13 +70,28 @@ let BULLET_SPEED = cfg.bulletSpeed;
 let MAX_BOUNCES = cfg.maxBounces;
 let TANK_HP = cfg.tankHP;
 let MISSILE_SPEED = cfg.missileSpeed || 3.2;
+let MISSILE_ARM_TIME = cfg.missileArmTime || 0.6;
+let MISSILE_ARM_SPEED = cfg.missileArmSpeed || 5.4;
+let MISSILE_MIN_TURN_RADIUS = cfg.missileMinTurnRadius || 0.8;
 let MISSILE_ACCEL = cfg.missileAccel || 8;
+let WIRELESS_MISSILE_SPEED = cfg.wirelessMissileSpeed || 4.5;
+let WIRELESS_MISSILE_TURN_DIAMETER = cfg.wirelessMissileTurnDiameter || 0.75;
+let WIRELESS_MISSILE_LIFETIME = cfg.wirelessMissileLifetime || 12;
 let MISSILE_RADIUS = cfg.missileRadius || 0.15;
 let MISSILE_LIFETIME = cfg.missileLifetime || 12;
 let MISSILE_RETARGET_INTERVAL = cfg.missileRetargetInterval || 1;
 let POWERUP_SPAWN_INTERVAL = cfg.powerUpSpawnInterval || 10;
 let POWERUP_RADIUS = cfg.powerUpRadius || 0.3;
 let MAX_POWERUPS = cfg.maxPowerUps || 3;
+let LANDMINE_ARM_TIME = cfg.landmineArmTime || 1;
+let LANDMINE_FADE_TIME = cfg.landmineFadeTime || 2;
+let LANDMINE_RADIUS = cfg.landmineRadius || 0.18;
+let ICE_ARM_TIME = cfg.iceArmTime || cfg.iceVisibleTime || 1;
+let ICE_FADE_TIME = cfg.iceFadeTime || 2;
+let ICE_EFFECT_DURATION = cfg.iceEffectDuration || 3;
+let ICE_TRACTION = cfg.iceTraction || 0.05;
+let ICE_TURN_TRACTION = cfg.iceTurnTraction || 1.5;
+let ICE_RADIUS = cfg.iceRadius || 0.2;
 
 // --- Game State ---
 let gameState = 'lobby'; // lobby | playing | roundEnd
@@ -75,9 +105,15 @@ let rematchVotes = new Set();
 let roundEndTimer = null;  // 5-second auto-restart timer
 let powerUps = [];         // { id, x, y, type, angle }
 let missiles = [];         // { id, ownerId, x, y, vx, vy, targetId, retargetTimer, lifetime }
+let wirelessMissiles = []; // { id, pilotId, x, y, angle, lifetime }
 let nextPowerUpId = 1;
 let nextMissileId = 1;
+let nextWirelessMissileId = 1;
+let nextLandmineId = 1;
+let nextIceTrapId = 1;
 let powerUpSpawnTimer = 0;
+let landmines = [];        // { id, x, y, ownerId, armTimer }
+let iceTraps = [];         // { id, x, y, ownerId, visibleTimer }
 
 // --- Color Assignment ---
 function assignColor(playerIndex) {
@@ -299,10 +335,10 @@ function hasLineOfSight(map, x1, y1, x2, y2) {
 // --- BFS shortest path distance (in cells) ---
 function bfsDistance(map, startCol, startRow, endCol, endRow) {
   const { rows, cols, hWalls, vWalls } = map;
-  const sr = Math.floor(startRow);
-  const sc = Math.floor(startCol);
-  const er = Math.floor(endRow);
-  const ec = Math.floor(endCol);
+  const sr = Math.max(0, Math.min(rows - 1, Math.floor(startRow)));
+  const sc = Math.max(0, Math.min(cols - 1, Math.floor(startCol)));
+  const er = Math.max(0, Math.min(rows - 1, Math.floor(endRow)));
+  const ec = Math.max(0, Math.min(cols - 1, Math.floor(endCol)));
 
   if (sr === er && sc === ec) return 0;
 
@@ -449,10 +485,16 @@ function spawnPowerUp(map) {
       }
     }
     if (!tooClose) {
+      const types = [];
+      if (cfg.spawnMissile !== false)         types.push('missile');
+      if (cfg.spawnWirelessMissile !== false)  types.push('wirelessMissile');
+      if (cfg.spawnLandmine !== false)         types.push('landmine');
+      if (cfg.spawnIce !== false)              types.push('ice');
+      if (types.length === 0) return;
       powerUps.push({
         id: nextPowerUpId++,
         x, y,
-        type: 'missile',
+        type: types[Math.floor(Math.random() * types.length)],
         angle: Math.random() * Math.PI * 2,
       });
       return;
@@ -754,22 +796,43 @@ function tick() {
   // --- Tank Movement ---
   for (const [id, player] of players) {
     if (!player.alive) continue;
+    if (player.pilotingMissileId !== null) {
+      player.spacePrev = player.input.space;
+      continue; // Input is consumed by wireless missile tick
+    }
     const keys = player.input;
 
-    // Rotation
-    if (keys.a) player.angle -= ROTATION_SPEED * DT;
-    if (keys.d) player.angle += ROTATION_SPEED * DT;
+    // Desired rotation and movement
+    let desiredAngVel = 0;
+    if (keys.a) desiredAngVel = -ROTATION_SPEED;
+    if (keys.d) desiredAngVel = ROTATION_SPEED;
 
-    // Movement
-    let dx = 0;
-    let dy = 0;
+    let desiredVx = 0, desiredVy = 0;
     if (keys.w) {
-      dx = Math.cos(player.angle) * TANK_SPEED * DT;
-      dy = Math.sin(player.angle) * TANK_SPEED * DT;
+      desiredVx = Math.cos(player.angle) * TANK_SPEED;
+      desiredVy = Math.sin(player.angle) * TANK_SPEED;
     } else if (keys.s) {
-      dx = -Math.cos(player.angle) * TANK_SPEED * DT;
-      dy = -Math.sin(player.angle) * TANK_SPEED * DT;
+      desiredVx = -Math.cos(player.angle) * TANK_SPEED;
+      desiredVy = -Math.sin(player.angle) * TANK_SPEED;
     }
+
+    if (player.iceTimer > 0) {
+      player.iceTimer -= DT;
+      // Preserve velocity (very low traction = barely slows down)
+      player.vx += (desiredVx - player.vx) * ICE_TRACTION * DT;
+      player.vy += (desiredVy - player.vy) * ICE_TRACTION * DT;
+      // Turn speed is slow but responsive enough to be controllable
+      player.angularVel += (desiredAngVel - player.angularVel) * ICE_TURN_TRACTION * DT;
+    } else {
+      player.vx = desiredVx;
+      player.vy = desiredVy;
+      player.angularVel = desiredAngVel;
+    }
+
+    player.angle += player.angularVel * DT;
+
+    const dx = player.vx * DT;
+    const dy = player.vy * DT;
 
     if (dx !== 0 || dy !== 0) {
       const resolved = resolveTankCollision(player.x + dx, player.y + dy, TANK_RADIUS, map);
@@ -779,8 +842,7 @@ function tick() {
 
     // --- Firing (edge trigger) ---
     if (keys.space && !player.spacePrev) {
-      if (player.hasMissile) {
-        // Fire missile instead of bullet
+      if (player.powerUp === 'missile') {
         const cosA = Math.cos(player.angle);
         const sinA = Math.sin(player.angle);
         const spawnDist = cfg.barrelLength + 0.15;
@@ -789,14 +851,49 @@ function tick() {
           ownerId: id,
           x: player.x + cosA * spawnDist,
           y: player.y + sinA * spawnDist,
-          vx: cosA * MISSILE_SPEED,
-          vy: sinA * MISSILE_SPEED,
+          vx: cosA * MISSILE_ARM_SPEED,
+          vy: sinA * MISSILE_ARM_SPEED,
           targetId: null,
           retargetTimer: 0,
           lifetime: MISSILE_LIFETIME,
-          armTimer: 0.6, // travel straight for 0.6s before activating targeting
+          armTimer: MISSILE_ARM_TIME,
         });
-        player.hasMissile = false;
+        player.powerUp = null;
+      } else if (player.powerUp === 'landmine') {
+        landmines.push({
+          id: nextLandmineId++,
+          x: player.x,
+          y: player.y,
+          ownerId: id,
+          armTimer: LANDMINE_ARM_TIME,
+          fadeTimer: LANDMINE_FADE_TIME,
+        });
+        player.powerUp = null;
+      } else if (player.powerUp === 'ice') {
+        iceTraps.push({
+          id: nextIceTrapId++,
+          x: player.x,
+          y: player.y,
+          ownerId: id,
+          armTimer: ICE_ARM_TIME,
+          fadeTimer: ICE_FADE_TIME,
+        });
+        player.powerUp = null;
+      } else if (player.powerUp === 'wirelessMissile') {
+        const cosA = Math.cos(player.angle);
+        const sinA = Math.sin(player.angle);
+        const spawnDist = cfg.barrelLength + 0.15;
+        const wm = {
+          id: nextWirelessMissileId++,
+          pilotId: id,
+          x: player.x + cosA * spawnDist,
+          y: player.y + sinA * spawnDist,
+          angle: player.angle,
+          lifetime: WIRELESS_MISSILE_LIFETIME,
+        };
+        wirelessMissiles.push(wm);
+        player.pilotingMissileId = wm.id;
+        player.powerUp = null;
       } else {
         // Check if player has no active bullet
         const hasActiveBullet = bullets.some(b => b.ownerId === id);
@@ -1021,10 +1118,10 @@ function tick() {
     const pu = powerUps[i];
     for (const [id, player] of players) {
       if (!player.alive) continue;
-      if (player.hasMissile) continue; // already holding one
+      if (player.powerUp) continue; // already holding one
       const dist = Math.hypot(pu.x - player.x, pu.y - player.y);
       if (dist < POWERUP_RADIUS + TANK_RADIUS) {
-        player.hasMissile = true;
+        player.powerUp = pu.type;
         powerUps.splice(i, 1);
         break;
       }
@@ -1071,39 +1168,34 @@ function tick() {
         continue;
       }
 
-      // Steer toward target via BFS pathfinding
+      // Steer toward target via BFS pathfinding with min turn radius
       const target = players.get(m.targetId);
       if (target) {
         const waypoint = bfsNextWaypoint(map, m.x, m.y, target.x, target.y);
         const dx = waypoint.x - m.x;
         const dy = waypoint.y - m.y;
-        const dist = Math.hypot(dx, dy);
-        if (dist > 0.01) {
-          const ndx = dx / dist;
-          const ndy = dy / dist;
-
-          // Decompose velocity into parallel (along desired) and perpendicular
-          const dot = m.vx * ndx + m.vy * ndy;
-          const perpX = m.vx - dot * ndx;
-          const perpY = m.vy - dot * ndy;
-
-          // Dampen perpendicular component — actively sheds wrong-direction momentum
-          const perpDamp = Math.max(0, 1 - 4 * DT);
-          m.vx = dot * ndx + perpX * perpDamp;
-          m.vy = dot * ndy + perpY * perpDamp;
-
-          // Accelerate toward desired direction
-          m.vx += ndx * MISSILE_ACCEL * DT;
-          m.vy += ndy * MISSILE_ACCEL * DT;
+        if (Math.hypot(dx, dy) > 0.01) {
+          const desiredAngle = Math.atan2(dy, dx);
+          const currentAngle = Math.atan2(m.vy, m.vx);
+          let angleDiff = desiredAngle - currentAngle;
+          while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+          while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+          // Max turn rate from min turn radius: ω = v / r
+          const maxDelta = (MISSILE_SPEED / MISSILE_MIN_TURN_RADIUS) * DT;
+          const newAngle = currentAngle + Math.max(-maxDelta, Math.min(maxDelta, angleDiff));
+          const spd = Math.hypot(m.vx, m.vy);
+          m.vx = Math.cos(newAngle) * spd;
+          m.vy = Math.sin(newAngle) * spd;
         }
       }
     }
 
-    // Clamp speed
+    // Normalize to target speed (arm phase uses arm speed, homing uses missile speed)
     const speed = Math.hypot(m.vx, m.vy);
-    if (speed > MISSILE_SPEED) {
-      m.vx *= MISSILE_SPEED / speed;
-      m.vy *= MISSILE_SPEED / speed;
+    if (speed > 0) {
+      const targetSpeed = armed ? MISSILE_SPEED : MISSILE_ARM_SPEED;
+      m.vx = m.vx / speed * targetSpeed;
+      m.vy = m.vy / speed * targetSpeed;
     }
 
     // Move
@@ -1162,6 +1254,116 @@ function tick() {
       }
     }
     if (missileDestroyed) continue;
+  }
+
+  // --- Landmine update ---
+  for (let i = landmines.length - 1; i >= 0; i--) {
+    const lm = landmines[i];
+    if (lm.armTimer > 0) {
+      lm.armTimer -= DT;
+      continue; // Still arming, not yet dangerous
+    }
+    // Armed — count down fade timer
+    if (lm.fadeTimer > 0) lm.fadeTimer -= DT;
+    // Check tank collision (always armed, even when invisible)
+    let destroyed = false;
+    for (const [id, player] of players) {
+      if (!player.alive) continue;
+      const dist = Math.hypot(lm.x - player.x, lm.y - player.y);
+      if (dist < LANDMINE_RADIUS + TANK_RADIUS) {
+        player.hp--;
+        if (player.hp <= 0) {
+          player.alive = false;
+          frameDeaths.push({ x: player.x, y: player.y, color: player.color });
+        }
+        frameHits.push({ x: lm.x, y: lm.y });
+        frameDeaths.push({ x: lm.x, y: lm.y, color: '#888888' });
+        landmines.splice(i, 1);
+        destroyed = true;
+        break;
+      }
+    }
+    if (destroyed) continue;
+  }
+
+  // --- Ice trap update ---
+  for (let i = iceTraps.length - 1; i >= 0; i--) {
+    const it = iceTraps[i];
+    if (it.armTimer > 0) {
+      it.armTimer -= DT;
+      continue; // Still deploying, not yet active
+    }
+    // Armed — count down fade timer
+    if (it.fadeTimer > 0) it.fadeTimer -= DT;
+    // Check tank collision (always active, even when invisible)
+    let destroyed = false;
+    for (const [id, player] of players) {
+      if (!player.alive) continue;
+      const dist = Math.hypot(it.x - player.x, it.y - player.y);
+      if (dist < ICE_RADIUS + TANK_RADIUS) {
+        player.iceTimer = ICE_EFFECT_DURATION;
+        iceTraps.splice(i, 1);
+        destroyed = true;
+        break;
+      }
+    }
+    if (destroyed) continue;
+  }
+
+  // --- Wireless Missile update ---
+  for (let i = wirelessMissiles.length - 1; i >= 0; i--) {
+    const wm = wirelessMissiles[i];
+    wm.lifetime -= DT;
+    const pilot = players.get(wm.pilotId);
+
+    // Destroy if pilot gone/dead or lifetime expired
+    if (!pilot || !pilot.alive || wm.lifetime <= 0) {
+      frameDeaths.push({ x: wm.x, y: wm.y, color: pilot ? pilot.color : '#888888' });
+      if (pilot) pilot.pilotingMissileId = null;
+      wirelessMissiles.splice(i, 1);
+      continue;
+    }
+
+    // Steer from pilot input — instant, no inertia
+    const keys = pilot.input;
+    const turnRadius = WIRELESS_MISSILE_TURN_DIAMETER / 2;
+    const maxTurnRate = WIRELESS_MISSILE_SPEED / turnRadius; // rad/s
+    if (keys.a) wm.angle -= maxTurnRate * DT;
+    if (keys.d) wm.angle += maxTurnRate * DT;
+
+    // Move forward
+    wm.x += Math.cos(wm.angle) * WIRELESS_MISSILE_SPEED * DT;
+    wm.y += Math.sin(wm.angle) * WIRELESS_MISSILE_SPEED * DT;
+
+    // Bounce off walls
+    const wallHit = findFirstWallCollision(wm.x, wm.y, MISSILE_RADIUS, map);
+    if (wallHit) {
+      if (wallHit.type === 'h') wm.angle = -wm.angle;
+      else wm.angle = Math.PI - wm.angle;
+      const resolved = resolveTankCollision(wm.x, wm.y, MISSILE_RADIUS, map);
+      wm.x = resolved.x;
+      wm.y = resolved.y;
+    }
+
+    // Tank collision — skip pilot
+    let wmDestroyed = false;
+    for (const [tid, target] of players) {
+      if (tid === wm.pilotId || !target.alive) continue;
+      if (Math.hypot(wm.x - target.x, wm.y - target.y) < MISSILE_RADIUS + TANK_RADIUS) {
+        target.hp--;
+        if (target.hp <= 0) {
+          target.alive = false;
+          frameDeaths.push({ x: target.x, y: target.y, color: target.color });
+        }
+        frameHits.push({ x: wm.x, y: wm.y });
+        frameDeaths.push({ x: wm.x, y: wm.y, color: pilot.color });
+        pilot.pilotingMissileId = null;
+        wirelessMissiles.splice(i, 1);
+        wmDestroyed = true;
+        break;
+      }
+    }
+    if (wmDestroyed) continue;
   }
 
   // --- Round End Check ---
@@ -1236,6 +1438,9 @@ function startNewRound() {
   bullets = [];
   powerUps = [];
   missiles = [];
+  wirelessMissiles = [];
+  landmines = [];
+  iceTraps = [];
   powerUpSpawnTimer = POWERUP_SPAWN_INTERVAL;
   currentMap = generateMap(players.size);
   const spawns = spawnPlayers(currentMap, players);
@@ -1246,7 +1451,10 @@ function startNewRound() {
     player.hp = TANK_HP;
     player.alive = true;
     player.spacePrev = false;
-    player.hasMissile = false;
+    player.powerUp = null;
+    player.pilotingMissileId = null;
+    player.vx = 0; player.vy = 0; player.angularVel = 0;
+    player.iceTimer = 0;
   }
 
   // Build spawns array for broadcast
@@ -1284,7 +1492,8 @@ function broadcastState() {
       alive: player.alive,
       color: player.color,
       name: player.name,
-      hasMissile: player.hasMissile || false,
+      powerUp: player.powerUp || null,
+      piloting: player.pilotingMissileId !== null,
     });
   }
 
@@ -1316,6 +1525,29 @@ function broadcastState() {
       angle: Math.atan2(m.vy, m.vx),
       ownerId: m.ownerId,
       targetId: m.targetId,
+    }));
+  }
+  if (wirelessMissiles.length > 0) {
+    stateObj.wirelessMissiles = wirelessMissiles.map(wm => ({
+      id: wm.id, x: wm.x, y: wm.y, angle: wm.angle,
+      ownerId: wm.pilotId,
+      color: players.get(wm.pilotId)?.color || '#888888',
+    }));
+  }
+  const visibleLandmines = landmines.filter(lm => lm.armTimer > 0 || lm.fadeTimer > 0);
+  if (visibleLandmines.length > 0) {
+    stateObj.landmines = visibleLandmines.map(lm => ({
+      id: lm.id, x: lm.x, y: lm.y,
+      armed: lm.armTimer <= 0,
+      alpha: lm.armTimer > 0 ? 1 : Math.max(0, lm.fadeTimer / LANDMINE_FADE_TIME),
+    }));
+  }
+  const visibleIceTraps = iceTraps.filter(it => it.armTimer > 0 || it.fadeTimer > 0);
+  if (visibleIceTraps.length > 0) {
+    stateObj.iceTraps = visibleIceTraps.map(it => ({
+      id: it.id, x: it.x, y: it.y,
+      armed: it.armTimer <= 0,
+      alpha: it.armTimer > 0 ? 1 : Math.max(0, it.fadeTimer / ICE_FADE_TIME),
     }));
   }
   const msg = JSON.stringify(stateObj);
@@ -1494,7 +1726,10 @@ wss.on('connection', (ws) => {
         y: 0,
         angle: 0,
         spacePrev: false,
-        hasMissile: false,
+        powerUp: null,
+        pilotingMissileId: null,
+        vx: 0, vy: 0, angularVel: 0,
+        iceTimer: 0,
         msgTimestamps: [],
       });
 
@@ -1694,6 +1929,9 @@ function startGame() {
   bullets = [];
   powerUps = [];
   missiles = [];
+  wirelessMissiles = [];
+  landmines = [];
+  iceTraps = [];
   powerUpSpawnTimer = POWERUP_SPAWN_INTERVAL;
   currentMap = generateMap(players.size);
   const spawns = spawnPlayers(currentMap, players);
@@ -1704,7 +1942,10 @@ function startGame() {
     player.hp = TANK_HP;
     player.alive = true;
     player.spacePrev = false;
-    player.hasMissile = false;
+    player.powerUp = null;
+    player.pilotingMissileId = null;
+    player.vx = 0; player.vy = 0; player.angularVel = 0;
+    player.iceTimer = 0;
   }
 
   // Build spawns array for broadcast
@@ -1743,6 +1984,9 @@ function stopGame() {
   bullets = [];
   powerUps = [];
   missiles = [];
+  wirelessMissiles = [];
+  landmines = [];
+  iceTraps = [];
   currentMap = null;
   rematchVotes = new Set();
   for (const [id, player] of players) {
@@ -1773,6 +2017,9 @@ function fullRestart() {
   bullets = [];
   powerUps = [];
   missiles = [];
+  wirelessMissiles = [];
+  landmines = [];
+  iceTraps = [];
   currentMap = null;
   scores = {};
   rematchVotes = new Set();
