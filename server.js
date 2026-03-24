@@ -1335,14 +1335,10 @@ function tick() {
     wm.x += Math.cos(wm.angle) * WIRELESS_MISSILE_SPEED * DT;
     wm.y += Math.sin(wm.angle) * WIRELESS_MISSILE_SPEED * DT;
 
-    // No wall bouncing — destroy on wall contact
-    const wallHit = findFirstWallCollision(wm.x, wm.y, MISSILE_RADIUS, map);
-    if (wallHit) {
-      frameDeaths.push({ x: wm.x, y: wm.y, color: pilot.color });
-      pilot.pilotingMissileId = null;
-      wirelessMissiles.splice(i, 1);
-      continue;
-    }
+    // No bouncing — slide along walls like a tank
+    const wmResolved = resolveTankCollision(wm.x, wm.y, MISSILE_RADIUS, map);
+    wm.x = wmResolved.x;
+    wm.y = wmResolved.y;
 
     // Tank collision — skip pilot
     let wmDestroyed = false;
