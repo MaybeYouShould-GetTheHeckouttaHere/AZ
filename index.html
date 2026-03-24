@@ -962,8 +962,13 @@
     }
 
     // --- Drawing: Wireless Missile BFS Paths ---
+    let _wmPathsLogTimer = 0;
     function drawWmPaths() {
       const myWm = gameWirelessMissiles.find(wm => wm.ownerId === myId);
+      _wmPathsLogTimer++;
+      if (_wmPathsLogTimer % 60 === 0) {
+        console.log('[wmPaths] myId:', myId, 'wms:', gameWirelessMissiles.length, 'myWm:', myWm ? {ownerId: myWm.ownerId, paths: myWm.paths} : null);
+      }
       if (!myWm || !myWm.paths || myWm.paths.length === 0) return;
       ctx.save();
       ctx.lineWidth = cellSize * 0.1;
